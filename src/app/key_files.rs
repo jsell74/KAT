@@ -31,17 +31,35 @@ use crate::protocols::ProtocolRegistry;
 use crate::radio::devices::RadioKind;
 use crate::radio::SUBGHZ_DIR;
 
+/// Identity of the crypto remote for Flipper push dedupe (one key file per HiTag2 UID / KeeLoq
+/// serial). `None` = no stable crypto id (still push, but do not collapse with others).
+fn flipper_crypto_remote_id(capture: &Capture) -> Option<String> {
+    if let Ok(frame) = hitag2_bf::frame_of(capture) {
+        return Some(format!("hitag2:{:08X}", frame.uid));
+    }
+    capture.serial.map(|s| format!("serial:{s:08X}"))
+}
+
 /// Bytes and SD path for a capture pushed to `/ext/subghz` (key file preferred, else RAW).
+/// `allow_key_file`: when false, never write a Flipper key `.sub` (used so `:pushflipper` does not
+/// push the same crypto key once per press of the same remote — only the first keeps the key file).
 fn flipper_push_payload(
     capture: &Capture,
     protocols: &ProtocolRegistry,
+    allow_key_file: bool,
 ) -> Result<(Vec<u8>, String, &'static str), String> {
-    let (bytes, kind) = match flipper::capture_flipper_key(capture, protocols) {
-        Some(key) => (key.to_text().into_bytes(), "key"),
-        None if capture.has_raw_data() => flipper::flipper_sub_text(capture)
+    let (bytes, kind) = match (allow_key_file, flipper::capture_flipper_key(capture, protocols)) {
+        (true, Some(key)) => (key.to_text().into_bytes(), "key"),
+        (_, _) if capture.has_raw_data() => flipper::flipper_sub_text(capture)
             .map(|text| (text.into_bytes(), "RAW"))
             .map_err(|e| format!("Could not build .sub: {e:#}"))?,
-        None => {
+        (false, Some(_)) => {
+            return Err(format!(
+                "{}: crypto key already pushed for this remote (skipped duplicate key .sub)",
+                capture.protocol_name()
+            ));
+        }
+        (_, None) => {
             return Err(format!(
                 "{} has no Flipper key file and no raw pairs to push",
                 capture.protocol_name()
@@ -347,7 +365,7 @@ impl App {
             self.last_error = Some(format!("Capture #{id:02} not found"));
             return;
         };
-        let (bytes, path, kind) = match flipper_push_payload(&capture, &self.protocols) {
+        let (bytes, path, kind) = match flipper_push_payload(&capture, &self.protocols, true) {
             Ok(v) => v,
             Err(e) => {
                 self.last_error = Some(e);
@@ -363,8 +381,9 @@ impl App {
     }
 
     /// `:pushflipper`: push every capture the list shows (filter + Unknown setting) to
-    /// `/ext/subghz` over USB. Skips ones with neither a key file nor raw pairs; status line
-    /// reports how many succeeded and which failed.
+    /// `/ext/subghz` over USB. One Flipper **key** `.sub` (with crypto key) per remote; further
+    /// presses of the same remote go as RAW when possible, so the same HiTag2/KeeLoq key is not
+    /// written many times. Skips ones with neither a key file nor raw pairs.
     pub fn push_all_visible_to_flipper(&mut self) {
         if self.flipper_for_push().is_none() {
             self.last_error = Some(Self::no_flipper_for_push_msg());
@@ -375,9 +394,17 @@ impl App {
             self.status_message = Some("No captures to push (the list is empty)".to_string());
             return;
         }
+        let mut key_remotes = std::collections::HashSet::<String>::new();
         let jobs: Vec<(u32, Result<(Vec<u8>, String, &'static str), String>)> = view
             .iter()
-            .filter_map(|&i| self.captures.get(i).map(|c| (c.id, flipper_push_payload(c, &self.protocols))))
+            .filter_map(|&i| {
+                let c = self.captures.get(i)?;
+                let allow_key = match flipper_crypto_remote_id(c) {
+                    Some(id) => key_remotes.insert(id),
+                    None => true,
+                };
+                Some((c.id, flipper_push_payload(c, &self.protocols, allow_key)))
+            })
             .collect();
         let skip = jobs.iter().filter(|(_, r)| r.is_err()).count();
         let mut ok = 0usize;
@@ -386,7 +413,7 @@ impl App {
         for (n, (id, prepared)) in jobs.into_iter().enumerate() {
             match prepared {
                 Err(_) => {
-                    // Already counted as skip: no key and no raw.
+                    // Already counted as skip: no key/RAW, or duplicate key with no RAW.
                 }
                 Ok((bytes, path, _)) => {
                     self.status_message =
@@ -407,7 +434,7 @@ impl App {
         }
         let mut msg = format!("Pushed {ok} of {total} to Flipper (/ext/subghz)");
         if skipped > 0 {
-            msg.push_str(&format!(" · {skipped} skipped (no key/RAW)"));
+            msg.push_str(&format!(" · {skipped} skipped (no key/RAW or duplicate key)"));
         }
         if failed.is_empty() {
             self.status_message = Some(msg);
@@ -490,12 +517,24 @@ mod tests {
                     Key: 0F 73 91 67 BD 75 B2 BD\n";
         let key = crate::protocols::FlipperKey::parse(text).unwrap();
         let c = flipper::capture_from_key(&key, &reg, 7).unwrap();
-        let (_, path, kind) = flipper_push_payload(&c, &reg).unwrap();
+        let (_, path, kind) = flipper_push_payload(&c, &reg, true).unwrap();
         assert_eq!(kind, "key");
         assert!(path.starts_with("/ext/subghz/"), "{path}");
         assert!(path.ends_with("_07.sub"), "{path}");
         let empty = Capture::from_pairs(3, 433_920_000, Vec::new());
-        assert!(flipper_push_payload(&empty, &reg).is_err());
+        assert!(flipper_push_payload(&empty, &reg, true).is_err());
+    }
+
+    #[test]
+    fn push_payload_dedupes_key_file_to_raw_when_disallowed() {
+        let reg = ProtocolRegistry::new();
+        let text = "Filetype: Flipper SubGhz Key File\nVersion: 1\nFrequency: 433920000\n\
+                    Preset: FuriHalSubGhzPreset2FSKDev476Async\nProtocol: Kia V0\nBit: 61\n\
+                    Key: 0F 73 91 67 BD 75 B2 BD\n";
+        let key = crate::protocols::FlipperKey::parse(text).unwrap();
+        let c = flipper::capture_from_key(&key, &reg, 7).unwrap();
+        // Key-only capture: without allow_key_file there is nothing to push.
+        assert!(flipper_push_payload(&c, &reg, false).is_err());
     }
 
     /// Captures without raw pairs lose Replay, the RAW export and Analyze; the key-file
