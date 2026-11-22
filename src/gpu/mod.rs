@@ -113,11 +113,10 @@ pub fn available() -> bool {
 /// Whether the GPU is up already and preferred, without starting it: for the UI thread, which must
 /// not wait for a driver (a search brings the GPU up on its own thread, the first time one runs).
 pub fn is_up() -> bool {
-<<<<<<< HEAD
-    CONTEXT.get().is_some_and(|c| c.as_ref().is_some_and(|ctx| !ctx.has_failed()))
-=======
-    prefer_gpu() && CONTEXT.get().is_some_and(Option::is_some)
->>>>>>> d1d86f5 (Add key_search_device: GPU or CPU for KeeLoq/HiTag2)
+    prefer_gpu()
+        && CONTEXT
+            .get()
+            .is_some_and(|c| c.as_ref().is_some_and(|ctx| !ctx.has_failed()))
 }
 
 /// A short description of the GPU KAT would use, e.g. for a startup line or `--help`.

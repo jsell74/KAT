@@ -271,11 +271,18 @@ pub fn save_key(config_dir: &Path, uid: u32, key: [u8; 6], epoch: u32) -> std::i
     }
     let _guard = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let path = config_dir.join(FILE_NAME);
+    let epoch = epoch & EPOCH_MASK;
+    // Same crypto key already known for this UID: do not rewrite hitag2_keys.txt again.
+    if let Some(have) = find(uid) {
+        if have.key == Some(key) && have.epoch == epoch && path.is_file() {
+            return Ok(path);
+        }
+    }
     let existing = match std::fs::read_to_string(&path) {
         Ok(text) => Some(text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => {
-            remember(uid, Record { key: Some(key), epoch: epoch & EPOCH_MASK, seed: find(uid).and_then(|r| r.seed) });
+            remember(uid, Record { key: Some(key), epoch, seed: find(uid).and_then(|r| r.seed) });
             return Err(e);
         }
     };
@@ -350,11 +357,15 @@ pub fn adopt_file_key(uid: u32, key: [u8; 6], epoch: u32) {
     if !uid_ok(uid) {
         return;
     }
+    let epoch = epoch & EPOCH_MASK;
+    if find(uid).is_some_and(|r| r.key == Some(key) && r.epoch == epoch) {
+        return;
+    }
     let dir = CONFIG_DIR.read().unwrap_or_else(|e| e.into_inner()).clone();
     match dir {
         // The session keeps the key even when the file cannot be written.
         Some(dir) => drop(save_key(&dir, uid, key, epoch)),
-        None => remember(uid, Record { key: Some(key), epoch: epoch & EPOCH_MASK, seed: find(uid).and_then(|r| r.seed) }),
+        None => remember(uid, Record { key: Some(key), epoch, seed: find(uid).and_then(|r| r.seed) }),
     }
 }
 
