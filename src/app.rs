@@ -657,6 +657,8 @@ impl App {
 
         let mut protocols = ProtocolRegistry::new();
         protocols.set_auto_key_search(storage.config.autobf);
+        #[cfg(feature = "gpu")]
+        crate::gpu::set_prefer_gpu(storage.config.key_search_gpu);
         let (radio_event_tx, radio_event_rx) = mpsc::channel();
 
         // The radios (config `device`: every HackRF, RTL-SDR, Flipper Zero and SoapySDR radio found, app/radios.rs);
@@ -898,6 +900,8 @@ impl App {
                     );
                 }
             },
+            // KeeLoq / HiTag2: GPU vs CPU (`key_search_device` in config.ini).
+            "keydevice" | "keygpu" => self.cmd_key_search_device(&args),
             // Every capture the list shows → `/ext/subghz` on a Flipper over USB.
             "pushflipper" | "pushall" => self.push_all_visible_to_flipper(),
             "radios" => self.cmd_radios(),
@@ -971,6 +975,54 @@ impl App {
         }
 
         Ok(())
+    }
+
+    /// `:keydevice gpu|cpu` — KeeLoq / HiTag2 on the graphics card or the processor; saved as
+    /// `key_search_device` in config.ini.
+    fn cmd_key_search_device(&mut self, args: &[&str]) {
+        match args.first().map(|a| a.to_ascii_lowercase()).as_deref() {
+            None => {
+                let want = if self.storage.config.key_search_gpu { "gpu" } else { "cpu" };
+                #[cfg(feature = "gpu")]
+                let note = if !crate::gpu::prefer_gpu() {
+                    " (forced CPU)".to_string()
+                } else if crate::gpu::is_up() {
+                    crate::gpu::description()
+                        .map(|d| format!(" ({d})"))
+                        .unwrap_or_default()
+                } else {
+                    " (GPU preferred; card opens on first search)".to_string()
+                };
+                #[cfg(not(feature = "gpu"))]
+                let note = " (this build has no GPU support)".to_string();
+                self.status_message = Some(format!("Key search device: {want}{note}"));
+            }
+            Some("gpu" | "auto" | "on" | "1" | "true" | "yes") => self.set_key_search_gpu(true),
+            Some("cpu" | "off" | "0" | "false" | "no") => self.set_key_search_gpu(false),
+            Some(_) => {
+                self.last_error =
+                    Some("Usage: :keydevice gpu|cpu (KeeLoq/HiTag2; saved as key_search_device)".to_string());
+            }
+        }
+    }
+
+    fn set_key_search_gpu(&mut self, gpu: bool) {
+        self.storage.config.key_search_gpu = gpu;
+        #[cfg(feature = "gpu")]
+        crate::gpu::set_prefer_gpu(gpu);
+        match self.storage.save_config() {
+            Ok(()) => {
+                self.status_message = Some(if gpu {
+                    "Key search: GPU when usable (saved in config.ini)".to_string()
+                } else {
+                    "Key search: CPU only (saved in config.ini)".to_string()
+                });
+            }
+            Err(e) => {
+                self.last_error =
+                    Some(format!("Key search device set, but config.ini could not be saved: {e}"));
+            }
+        }
     }
 
     /// Set the receive frequency
