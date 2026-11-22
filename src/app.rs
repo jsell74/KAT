@@ -879,6 +879,8 @@ impl App {
                         Some("Usage: :unknown [on|off] (U toggles; same as show_unknown_signals)".to_string());
                 }
             },
+            // Every capture the list shows → `/ext/subghz` on a Flipper over USB.
+            "pushflipper" | "pushall" => self.push_all_visible_to_flipper(),
             "radios" => self.cmd_radios(),
             "radio" => self.cmd_radio(&args),
             "txradio" => self.cmd_txradio(&args),
