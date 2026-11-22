@@ -266,15 +266,33 @@ fn term_fits(term: &Term, c: &Capture) -> bool {
 
 /// The captures the list shows under `filter` and `sort`: indexes into `captures`, in the order
 /// of the list's rows. With `show_unknown` false (config `show_unknown_signals`), Unknown captures
-/// are left out of the view as well as of live receive and imports.
-pub(super) fn visible(captures: &[Capture], filter: &str, sort: Sort, show_unknown: bool) -> Vec<usize> {
+/// are left out. With `hide_duplicates` true (config `ignore_duplicates`), later copies of the same
+/// decoded signal are left out too (the first kept wins), matching receive-time de-duplication.
+pub(super) fn visible(
+    captures: &[Capture],
+    filter: &str,
+    sort: Sort,
+    show_unknown: bool,
+    hide_duplicates: bool,
+) -> Vec<usize> {
     let terms = terms(filter);
-    let mut rows: Vec<usize> = (0..captures.len())
-        .filter(|&i| {
-            (show_unknown || captures[i].status != CaptureStatus::Unknown)
-                && terms.iter().all(|term| term_fits(term, &captures[i]))
-        })
-        .collect();
+    let mut rows: Vec<usize> = Vec::new();
+    for i in 0..captures.len() {
+        if !show_unknown && captures[i].status == CaptureStatus::Unknown {
+            continue;
+        }
+        if !terms.iter().all(|term| term_fits(term, &captures[i])) {
+            continue;
+        }
+        if hide_duplicates
+            && rows
+                .iter()
+                .any(|&j| super::files::same_decoded_signal(&captures[j], &captures[i]))
+        {
+            continue;
+        }
+        rows.push(i);
+    }
     if sort.column == Column::Id {
         // The list's own order: IDs only grow along it.
         if sort.descending {
@@ -383,6 +401,13 @@ pub(super) fn parse_sort(args: &[&str]) -> Result<Sort, String> {
 }
 
 impl App {
+    /// Whether the list may hide rows (text filter, Unknown off, or duplicates ignored).
+    fn list_may_hide_rows(&self) -> bool {
+        !self.list_view.filter.is_empty()
+            || !self.storage.config.show_unknown_signals
+            || self.storage.config.ignore_duplicates
+    }
+
     /// The captures the list shows: indexes into `captures`, in the order of its rows.
     pub fn visible_captures(&self) -> Vec<usize> {
         visible(
@@ -390,6 +415,7 @@ impl App {
             &self.list_view.filter,
             self.list_view.sort,
             self.storage.config.show_unknown_signals,
+            self.storage.config.ignore_duplicates,
         )
     }
 
@@ -397,8 +423,7 @@ impl App {
     /// the main loop (a capture can stop fitting the filter: a key search names its protocol, `i`
     /// sets its make), it moves from a hidden capture to the nearest shown one.
     pub fn keep_selection_shown(&mut self) {
-        // Without a text filter and with unknowns listed, every capture is shown.
-        if self.list_view.filter.is_empty() && self.storage.config.show_unknown_signals {
+        if !self.list_may_hide_rows() {
             return;
         }
         let view = self.visible_captures();
@@ -408,9 +433,7 @@ impl App {
     /// Select the capture at `at` when the list shows it; under a filter that hides it the
     /// selection stays where it is.
     pub(super) fn select_if_shown(&mut self, at: usize) {
-        if (self.list_view.filter.is_empty() && self.storage.config.show_unknown_signals)
-            || self.visible_captures().contains(&at)
-        {
+        if !self.list_may_hide_rows() || self.visible_captures().contains(&at) {
             self.selected_capture = Some(at);
         }
     }
@@ -421,36 +444,38 @@ impl App {
         let hidden = !self.visible_captures().contains(&at);
         if hidden {
             self.list_view.filter.clear();
-            // An Unknown capture added while unknowns are hidden: show them again so the new one
-            // is visible (and keep that choice in config.ini).
-            if !self.storage.config.show_unknown_signals {
-                self.storage.config.show_unknown_signals = true;
-                let _ = self.storage.save_config();
+            // Still hidden by U's clean list (Unknown off / duplicates ignored): expand it.
+            if !self.visible_captures().contains(&at) {
+                self.set_show_unknown(true);
             }
         }
         self.selected_capture = Some(at);
         hidden
     }
 
-    /// `U` / `:unknown`: show or hide Unknown captures in the list, matching
-    /// `show_unknown_signals` in config.ini (also used when receiving and importing).
+    /// `U` / `:unknown`: show or hide Unknown captures **and** duplicates together.
+    /// Hide → `show_unknown_signals = false` and `ignore_duplicates = true`; show → the opposite.
     pub fn toggle_show_unknown(&mut self) {
         self.set_show_unknown(!self.storage.config.show_unknown_signals);
     }
 
-    /// Set `show_unknown_signals`, persist it, and keep the selection on a shown capture.
+    /// Set the clean-list pair (`show_unknown_signals` / `ignore_duplicates`), persist it, and
+    /// keep the selection on a shown capture.
     pub fn set_show_unknown(&mut self, show: bool) {
         self.storage.config.show_unknown_signals = show;
+        // U hides clutter: Unknown off and duplicates ignored; U shows both again.
+        self.storage.config.ignore_duplicates = !show;
         match self.storage.save_config() {
             Ok(()) => {
                 self.status_message = Some(if show {
-                    "Unknown signals shown (U hides · saved in config.ini)".to_string()
+                    "Unknown and duplicates shown (U hides · saved in config.ini)".to_string()
                 } else {
-                    "Unknown signals hidden (U shows · saved in config.ini)".to_string()
+                    "Unknown and duplicates hidden (U shows · saved in config.ini)".to_string()
                 });
             }
             Err(e) => {
-                self.last_error = Some(format!("Unknown filter set, but config.ini could not be saved: {e}"));
+                self.last_error =
+                    Some(format!("List filter set, but config.ini could not be saved: {e}"));
             }
         }
         self.keep_selection_shown();
@@ -632,7 +657,7 @@ mod tests {
     }
 
     fn ids(captures: &[Capture], filter: &str, sort: Sort) -> Vec<u32> {
-        visible(captures, filter, sort, true).into_iter().map(|i| captures[i].id).collect()
+        visible(captures, filter, sort, true, false).into_iter().map(|i| captures[i].id).collect()
     }
 
     fn by(column: Column, descending: bool) -> Sort {
@@ -642,18 +667,29 @@ mod tests {
     #[test]
     fn no_filter_and_no_sort_is_the_list() {
         let list = list();
-        assert_eq!(visible(&list, "", Sort::default(), true), vec![0, 1, 2, 3, 4, 5]);
-        assert_eq!(visible(&list, "   ", Sort::default(), true), vec![0, 1, 2, 3, 4, 5]);
-        assert_eq!(visible(&[], "acme", Sort::default(), true), Vec::<usize>::new());
+        assert_eq!(visible(&list, "", Sort::default(), true, false), vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(visible(&list, "   ", Sort::default(), true, false), vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(visible(&[], "acme", Sort::default(), true, false), Vec::<usize>::new());
     }
 
     #[test]
     fn unknown_captures_can_be_hidden() {
         let list = list();
         // Capture #4 is Unknown (index 3).
-        assert_eq!(visible(&list, "", Sort::default(), false), vec![0, 1, 2, 4, 5]);
+        assert_eq!(visible(&list, "", Sort::default(), false, false), vec![0, 1, 2, 4, 5]);
         assert_eq!(ids(&list, "unknown", Sort::default()), [4]);
-        assert!(visible(&list, "unknown", Sort::default(), false).is_empty());
+        assert!(visible(&list, "unknown", Sort::default(), false, false).is_empty());
+    }
+
+    #[test]
+    fn duplicate_captures_can_be_hidden() {
+        let mut list = list();
+        // A second Acme V2 with the same fields as #1 (index 0): a duplicate.
+        let mut dup = list[0].clone();
+        dup.id = 99;
+        list.push(dup);
+        assert_eq!(visible(&list, "", Sort::default(), true, false).len(), 7);
+        assert_eq!(visible(&list, "", Sort::default(), true, true), vec![0, 1, 2, 3, 4, 5]);
     }
 
     #[test]

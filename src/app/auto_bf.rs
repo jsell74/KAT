@@ -3,8 +3,11 @@
 //! search as the signal menu's "Recover key" and on the same background job: one search runs at a
 //! time, the others wait here, oldest first, and a "Recover key" the user asks for goes first.
 //! They run beside a long KeeLoq or HiTag2 search (well under a second each), so frames keep
-//! showing up while one runs. HiTag2 keys (minutes of every core per remote) are only searched
-//! when asked (`app/hitag2_bf.rs`).
+//! showing up while one runs.
+//!
+//! With `autobf` on, KeeLoq magic-serial and HiTag2 Hell searches also start automatically when a
+//! capture without a key appears and the search has enough presses (KeeLoq: two hop codes; HiTag2:
+//! a second press of the same remote). They still wait if another long search runs.
 //! A frame of PSA's adaptive AM path that the fast path cannot decrypt (`PSA [unchecked]`, see
 //! `protocols/psa.rs`) waits here, outside the list, and joins it only if its key is found: a
 //! genuine TEA frame decrypts in a fraction of a second, noise never does. A child module of `app`
@@ -17,6 +20,7 @@ use crate::capture::{Capture, CaptureStatus, KeyRecovery};
 use crate::protocols::{
     psa_needs_key_search, psa_search_label, PsaBruteForceHit, PsaBruteForceOutcome, PSA_SEARCH_LABEL_ALL,
 };
+use crate::protocols::keeloq_bf as bf;
 
 /// A key search waiting for the background job.
 pub(super) enum Waiting {
@@ -25,6 +29,10 @@ pub(super) enum Waiting {
     Listed { id: u32, asked: bool },
     /// A `PSA [unchecked]` frame, listed only if its key is found.
     Unchecked(Box<Capture>),
+    /// KeeLoq magic-serial search (`autobf`).
+    Keeloq { id: u32 },
+    /// HiTag2 Hell search (`autobf`).
+    Hitag2 { id: u32 },
 }
 
 /// The searches waiting for the background job (`App::auto_bf`).
@@ -48,20 +56,50 @@ pub(super) fn apply_psa_hit(c: &mut Capture, hit: &PsaBruteForceHit) {
 
 impl App {
     /// Queue the key search of each listed capture in `ids` that needs one and has no result yet
-    /// (`autobf`; nothing when it is off).
+    /// (`autobf`; nothing when it is off). PSA, KeeLoq and HiTag2.
     pub(super) fn auto_bf_listed(&mut self, ids: impl IntoIterator<Item = u32>) {
         if !self.storage.config.autobf {
             return;
         }
         for id in ids {
-            let Some(c) = self.captures.iter().find(|c| c.id == id) else { continue };
-            if c.key_recovery.is_some() || !psa_needs_key_search(c.protocol_name(), c.serial, c.data_extra) {
+            let Some(c) = self.captures.iter().find(|c| c.id == id).cloned() else { continue };
+            if c.key_recovery.is_some() || self.key_search_planned(id) {
                 continue;
             }
-            if !self.key_search_planned(id) {
+            if psa_needs_key_search(c.protocol_name(), c.serial, c.data_extra) {
                 self.auto_bf.waiting.push_back(Waiting::Listed { id, asked: false });
+                continue;
+            }
+            if Self::keeloq_bf_offered(&c) && self.keeloq_autobf_ready(id) {
+                self.auto_bf.waiting.push_back(Waiting::Keeloq { id });
+                continue;
+            }
+            if self.hitag2_bf_offered(&c) && self.hitag2_autobf_ready(id) {
+                self.auto_bf.waiting.push_back(Waiting::Hitag2 { id });
             }
         }
+    }
+
+    /// Whether KeeLoq magic-serial has enough hop codes for a search of this capture's remote.
+    fn keeloq_autobf_ready(&self, id: u32) -> bool {
+        let Some(capture) = self.captures.iter().find(|c| c.id == id) else {
+            return false;
+        };
+        let serial = bf::Frame::from_data(capture.data).serial();
+        let frames = self.keeloq_frames_of(serial);
+        bf::check_input(&frames, &bf::AUTO_TYPES).is_ok()
+    }
+
+    /// Whether HiTag2 Hell has a second press of this remote to pair with.
+    fn hitag2_autobf_ready(&self, id: u32) -> bool {
+        use super::hitag2_bf::{frame_of, partner_of};
+        let Some(capture) = self.captures.iter().find(|c| c.id == id) else {
+            return false;
+        };
+        let Ok(f1) = frame_of(capture) else {
+            return false;
+        };
+        partner_of(&self.captures, capture, &f1).is_some()
     }
 
     /// Hold a `PSA [unchecked]` frame for its key search; a copy of one already held is dropped.
@@ -83,34 +121,63 @@ impl App {
     /// Whether capture `id`'s key search waits or runs (the detail panel says so).
     pub fn key_search_planned(&self, id: u32) -> bool {
         self.key_search_runs_for(id)
-            || self.auto_bf.waiting.iter().any(|w| matches!(w, Waiting::Listed { id: i, .. } if *i == id))
+            || self.auto_bf.waiting.iter().any(|w| match w {
+                Waiting::Listed { id: i, .. } | Waiting::Keeloq { id: i } | Waiting::Hitag2 { id: i } => *i == id,
+                Waiting::Unchecked(_) => false,
+            })
     }
 
-    /// Start the next waiting search once no PSA search runs (every tick); a long KeeLoq or HiTag2
-    /// search may run beside it.
+    /// Start the next waiting search once free (every tick). PSA searches may run beside a long
+    /// KeeLoq/HiTag2 one; those long ones wait until none is running.
     pub(super) fn auto_bf_tick(&mut self) {
-        if self.psa_recover_job.is_some() {
-            return;
-        }
+        let mut deferred = VecDeque::new();
         while let Some(next) = self.auto_bf.waiting.pop_front() {
             match next {
                 Waiting::Listed { id, asked } => {
-                    // Deleted, or decrypted meanwhile: nothing to search.
+                    if self.psa_recover_job.is_some() {
+                        deferred.push_back(Waiting::Listed { id, asked });
+                        continue;
+                    }
                     let Some(c) = self.captures.iter().find(|c| c.id == id) else { continue };
                     if !psa_needs_key_search(c.protocol_name(), c.serial, c.data_extra) {
                         continue;
                     }
                     let (data, extra) = (c.data, c.data_extra.unwrap_or_default());
+                    self.auto_bf.waiting.append(&mut deferred);
                     self.spawn_psa_job(data, extra, Some(id), None, !asked);
                     return;
                 }
                 Waiting::Unchecked(c) => {
+                    if self.psa_recover_job.is_some() {
+                        deferred.push_back(Waiting::Unchecked(c));
+                        continue;
+                    }
                     let (data, extra) = (c.data, c.data_extra.unwrap_or_default());
+                    self.auto_bf.waiting.append(&mut deferred);
                     self.spawn_psa_job(data, extra, None, Some(c), true);
+                    return;
+                }
+                Waiting::Keeloq { id } => {
+                    if self.long_key_search_runs() || !self.keeloq_autobf_ready(id) {
+                        deferred.push_back(Waiting::Keeloq { id });
+                        continue;
+                    }
+                    self.auto_bf.waiting.append(&mut deferred);
+                    self.start_keeloq_key_recovery(id, None);
+                    return;
+                }
+                Waiting::Hitag2 { id } => {
+                    if self.long_key_search_runs() || !self.hitag2_autobf_ready(id) {
+                        deferred.push_back(Waiting::Hitag2 { id });
+                        continue;
+                    }
+                    self.auto_bf.waiting.append(&mut deferred);
+                    self.start_hitag2_key_recovery(id);
                     return;
                 }
             }
         }
+        self.auto_bf.waiting = deferred;
     }
 
     /// The search of listed capture `id` finished (`auto`: started by `autobf`).

@@ -60,7 +60,7 @@ pub(super) struct Hitag2BfJob {
 }
 
 /// A capture's frame in the attack's terms, or why the attack cannot take it.
-fn frame_of(c: &Capture) -> Result<Hitag2Frame, String> {
+pub(super) fn frame_of(c: &Capture) -> Result<Hitag2Frame, String> {
     hell::frame_of(c.protocol_name(), &c.decoded_signal())
 }
 
@@ -80,7 +80,7 @@ fn offered(c: &Capture) -> bool {
 /// The second press to pair with capture `first` (frame `f1`): another capture of the same remote
 /// (same UID and protocol family) with another hop; one with another button first (with Fiat V2
 /// that proves the key for both buttons), then the newest.
-fn partner_of(captures: &[Capture], first: &Capture, f1: &Hitag2Frame) -> Option<(u32, Hitag2Frame)> {
+pub(super) fn partner_of(captures: &[Capture], first: &Capture, f1: &Hitag2Frame) -> Option<(u32, Hitag2Frame)> {
     captures
         .iter()
         .filter(|c| c.id != first.id && is_hitag2_remote(c))
