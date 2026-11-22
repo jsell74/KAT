@@ -265,6 +265,8 @@ pub enum SignalAction {
     ExportFlipper,
     /// Flipper key file via the protocol's `to_flipper_key` (only when it writes one).
     ExportFlipperKey,
+    /// Write the capture's `.sub` onto a Flipper Zero's SD card (`/ext/subghz`, USB console).
+    PushToFlipper,
     /// The signal report (app/analyze_view.rs): modulation, pulse widths, coding, rows and bits of
     /// any capture, and a decoded one's timing against its protocol definition (ProtoPirate's
     /// Timing Tuner).
@@ -308,6 +310,7 @@ impl SignalAction {
             SignalAction::ExportFob => "Export .fob",
             SignalAction::ExportFlipper => "Export .sub (Flipper)",
             SignalAction::ExportFlipperKey => "Export Flipper key (.sub)",
+            SignalAction::PushToFlipper => "Push to Flipper (/ext/subghz)",
             SignalAction::Analyze => "Analyze",
             SignalAction::Delete => "Delete Signal",
             SignalAction::RecoverKey => "Recover key (PSA brute force)",
@@ -866,6 +869,16 @@ impl App {
             // What the list shows, and in which order (app/list_view.rs)
             "filter" => self.filter_command(rest),
             "sort" => self.sort_command(&args),
+            // Same switch as config.ini `show_unknown_signals` (U toggles it).
+            "unknown" => match args.first().map(|a| a.to_ascii_lowercase()).as_deref() {
+                None => self.toggle_show_unknown(),
+                Some("on" | "1" | "true" | "yes" | "show") => self.set_show_unknown(true),
+                Some("off" | "0" | "false" | "no" | "hide") => self.set_show_unknown(false),
+                Some(_) => {
+                    self.last_error =
+                        Some("Usage: :unknown [on|off] (U toggles; same as show_unknown_signals)".to_string());
+                }
+            },
             "radios" => self.cmd_radios(),
             "radio" => self.cmd_radio(&args),
             "txradio" => self.cmd_txradio(&args),
@@ -1481,6 +1494,9 @@ impl App {
             }
             SignalAction::ExportFlipperKey => {
                 self.export_flipper_key(capture_id)?;
+            }
+            SignalAction::PushToFlipper => {
+                self.push_to_flipper(capture_id);
             }
             SignalAction::Analyze => {
                 self.open_analysis(capture_id);

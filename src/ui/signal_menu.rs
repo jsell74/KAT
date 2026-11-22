@@ -99,9 +99,10 @@ pub fn render_signal_menu(frame: &mut Frame, app: &App) {
         } else {
             match action {
                 SignalAction::Delete => Style::default().fg(Color::Red),
-                SignalAction::ExportFob | SignalAction::ExportFlipper | SignalAction::ExportFlipperKey => {
-                    Style::default().fg(Color::Green)
-                }
+                SignalAction::ExportFob
+                | SignalAction::ExportFlipper
+                | SignalAction::ExportFlipperKey
+                | SignalAction::PushToFlipper => Style::default().fg(Color::Green),
                 _ => theme::TEXT,
             }
         };
