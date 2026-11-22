@@ -98,7 +98,8 @@ pub fn render_signal_menu(frame: &mut Frame, app: &App) {
             theme::HIGHLIGHT
         } else {
             match action {
-                SignalAction::Delete => Style::default().fg(Color::Red),
+                SignalAction::Delete | SignalAction::DeleteKey => Style::default().fg(Color::Red),
+                SignalAction::ShowKey => Style::default().fg(Color::Yellow),
                 SignalAction::ExportFob
                 | SignalAction::ExportFlipper
                 | SignalAction::ExportFlipperKey
