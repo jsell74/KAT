@@ -7,7 +7,8 @@
 //!
 //! With `autobf` on, KeeLoq magic-serial and HiTag2 Hell searches also start automatically when a
 //! capture without a key appears and the search has enough presses (KeeLoq: two hop codes; HiTag2:
-//! a second press of the same remote). They still wait if another long search runs.
+//! a second press of the same remote). They still wait if another long search runs. One remote
+//! (same serial / HiTag2 UID) is never searched twice: later captures of that remote share the key.
 //! A frame of PSA's adaptive AM path that the fast path cannot decrypt (`PSA [unchecked]`, see
 //! `protocols/psa.rs`) waits here, outside the list, and joins it only if its key is found: a
 //! genuine TEA frame decrypts in a fraction of a second, noise never does. A child module of `app`
@@ -55,8 +56,76 @@ pub(super) fn apply_psa_hit(c: &mut Capture, hit: &PsaBruteForceHit) {
 }
 
 impl App {
+    /// KeeLoq remote serial of a capture (stored field, else from the 64-bit frame).
+    fn keeloq_remote_serial(c: &Capture) -> Option<u32> {
+        c.serial.or_else(|| (c.data_count_bit >= 64).then(|| bf::Frame::from_data(c.data).serial()))
+    }
+
+    /// Whether any capture of KeeLoq remote `serial` already has a key-search result.
+    fn keeloq_remote_has_key_result(&self, serial: u32) -> bool {
+        self.captures.iter().any(|c| {
+            c.key_recovery.is_some() && Self::keeloq_remote_serial(c) == Some(serial)
+        })
+    }
+
+    /// Whether a KeeLoq search for `serial` is running or already queued.
+    fn keeloq_search_for_serial_planned(&self, serial: u32) -> bool {
+        if self.keeloq_bf_job.as_ref().is_some_and(|j| j.serial == serial) {
+            return true;
+        }
+        self.auto_bf.waiting.iter().any(|w| {
+            matches!(w, Waiting::Keeloq { id }
+                if self.captures.iter().find(|c| c.id == *id)
+                    .and_then(Self::keeloq_remote_serial)
+                    == Some(serial))
+        })
+    }
+
+    /// Whether any HiTag2 capture of UID `uid` already has a key-search result.
+    fn hitag2_remote_has_key_result(&self, uid: u32) -> bool {
+        self.captures.iter().any(|c| {
+            c.key_recovery.is_some()
+                && super::hitag2_bf::frame_of(c).is_ok_and(|f| f.uid == uid)
+        })
+    }
+
+    /// Whether a HiTag2 search for UID `uid` is running or already queued.
+    fn hitag2_search_for_uid_planned(&self, uid: u32) -> bool {
+        if self.hitag2_bf_job.as_ref().is_some_and(|j| j.uid == uid) {
+            return true;
+        }
+        self.auto_bf.waiting.iter().any(|w| {
+            matches!(w, Waiting::Hitag2 { id }
+                if self.captures.iter().find(|c| c.id == *id)
+                    .and_then(|c| super::hitag2_bf::frame_of(c).ok())
+                    .is_some_and(|f| f.uid == uid))
+        })
+    }
+
+    /// Whether a PSA search for this serial is running or queued (same TEA key for the remote).
+    fn psa_search_for_serial_planned(&self, serial: Option<u32>) -> bool {
+        let Some(serial) = serial else {
+            return false;
+        };
+        if self.psa_recover_job.as_ref().and_then(|j| j.capture_id).is_some_and(|id| {
+            self.captures.iter().find(|c| c.id == id).is_some_and(|c| c.serial == Some(serial))
+        }) {
+            return true;
+        }
+        self.auto_bf.waiting.iter().any(|w| match w {
+            Waiting::Listed { id, .. } => self
+                .captures
+                .iter()
+                .find(|c| c.id == *id)
+                .is_some_and(|c| c.serial == Some(serial)),
+            Waiting::Unchecked(c) => c.serial == Some(serial),
+            _ => false,
+        })
+    }
+
     /// Queue the key search of each listed capture in `ids` that needs one and has no result yet
-    /// (`autobf`; nothing when it is off). PSA, KeeLoq and HiTag2.
+    /// (`autobf`; nothing when it is off). PSA, KeeLoq and HiTag2. At most one search per remote
+    /// serial / HiTag2 UID: later presses share the same key.
     pub(super) fn auto_bf_listed(&mut self, ids: impl IntoIterator<Item = u32>) {
         if !self.storage.config.autobf {
             return;
@@ -68,14 +137,29 @@ impl App {
             }
             // v1.22.4: PSA needs `data` as well as `data_extra`.
             if psa_needs_key_search(c.protocol_name(), c.serial, c.data, c.data_extra) {
+                if self.psa_search_for_serial_planned(c.serial) {
+                    continue;
+                }
                 self.auto_bf.waiting.push_back(Waiting::Listed { id, asked: false });
                 continue;
             }
             if Self::keeloq_bf_offered(c) && self.keeloq_autobf_ready(id) {
+                let Some(serial) = Self::keeloq_remote_serial(c) else { continue };
+                if self.keeloq_remote_has_key_result(serial)
+                    || self.keeloq_search_for_serial_planned(serial)
+                {
+                    continue;
+                }
                 self.auto_bf.waiting.push_back(Waiting::Keeloq { id });
                 continue;
             }
             if self.hitag2_bf_offered(c) && self.hitag2_autobf_ready(id) {
+                let Ok(frame) = super::hitag2_bf::frame_of(c) else { continue };
+                if self.hitag2_remote_has_key_result(frame.uid)
+                    || self.hitag2_search_for_uid_planned(frame.uid)
+                {
+                    continue;
+                }
                 self.auto_bf.waiting.push_back(Waiting::Hitag2 { id });
             }
         }

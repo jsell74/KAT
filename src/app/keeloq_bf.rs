@@ -15,7 +15,7 @@ use crate::protocols::keeloq_common::{add_keeloq_key, MfKey};
 /// A running KeeLoq key search.
 pub(super) struct KeeloqBfJob {
     pub(super) capture_id: u32,
-    serial: u32,
+    pub(super) serial: u32,
     learnings: Vec<u32>,
     captures: usize,
     pub(super) ctl: Arc<Control>,
