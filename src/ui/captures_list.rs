@@ -244,18 +244,32 @@ fn table_cell(col: Col, row: &RowText, capture: &Capture, width: u16) -> Cell<'s
 
 /// The table's title: " Captures ", and under a filter or a sort what the list shows:
 /// " Captures · 3 of 15 · filter: acme · sort: Serial ▼ ". For a box `width` columns wide: a long
-/// filter is cut, and the sort (the header marks it too) goes before the count does.
-fn list_title(shown: usize, count: usize, filter: &str, sort: Sort, width: usize) -> String {
+/// filter is cut, and the sort (the header marks it too) goes before the count does. With
+/// Unknowns hidden (`show_unknown_signals = false`) the count and "unknown hidden" appear too.
+fn list_title(
+    shown: usize,
+    count: usize,
+    filter: &str,
+    sort: Sort,
+    show_unknown: bool,
+    width: usize,
+) -> String {
     let filter = filter.trim();
+    let narrowed = !filter.is_empty() || !show_unknown;
     let room = width.saturating_sub(2);
     let sorted = (!sort.is_arrival_order())
         .then(|| format!("sort: {} {}", sort.column.title(), if sort.descending { "▼" } else { "▲" }));
     let title = |filter_room: Option<usize>, sorted: Option<&String>| {
         let mut parts = vec!["Captures".to_string()];
-        if !filter.is_empty() {
+        if narrowed {
             parts.push(format!("{shown} of {count}"));
-            if let Some(room) = filter_room {
-                parts.push(format!("filter: {}", text::truncate_end(filter, room)));
+            if !show_unknown {
+                parts.push("unknown hidden".to_string());
+            }
+            if !filter.is_empty() {
+                if let Some(room) = filter_room {
+                    parts.push(format!("filter: {}", text::truncate_end(filter, room)));
+                }
             }
         }
         parts.extend(sorted.cloned());
@@ -281,7 +295,14 @@ fn render_table(frame: &mut Frame, area: Rect, app: &App) {
     let view = app.visible_captures();
     let sort = app.list_view.sort;
     let filter = app.list_view.filter.as_str();
-    let title = list_title(view.len(), app.captures.len(), filter, sort, area.width as usize);
+    let title = list_title(
+        view.len(),
+        app.captures.len(),
+        filter,
+        sort,
+        app.storage.config.show_unknown_signals,
+        area.width as usize,
+    );
     let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(area);
 
@@ -884,27 +905,34 @@ mod tests {
     fn the_title_says_what_the_list_shows() {
         let arrival = Sort::default();
         let by_serial = Sort { column: Column::Serial, descending: true };
-        assert_eq!(list_title(15, 15, "", arrival, 80), " Captures ");
-        assert_eq!(list_title(3, 15, "acme", arrival, 80), " Captures · 3 of 15 · filter: acme ");
-        assert_eq!(list_title(15, 15, "  ", by_serial, 80), " Captures · sort: Serial ▼ ");
+        assert_eq!(list_title(15, 15, "", arrival, true, 80), " Captures ");
+        assert_eq!(list_title(3, 15, "acme", arrival, true, 80), " Captures · 3 of 15 · filter: acme ");
+        assert_eq!(list_title(15, 15, "  ", by_serial, true, 80), " Captures · sort: Serial ▼ ");
         assert_eq!(
-            list_title(3, 15, " acme ", Sort { descending: false, ..by_serial }, 80),
+            list_title(3, 15, " acme ", Sort { descending: false, ..by_serial }, true, 80),
             " Captures · 3 of 15 · filter: acme · sort: Serial ▲ "
         );
-        assert_eq!(list_title(15, 15, "", Sort { column: Column::Id, descending: true }, 80), " Captures · sort: ID ▼ ");
+        assert_eq!(
+            list_title(15, 15, "", Sort { column: Column::Id, descending: true }, true, 80),
+            " Captures · sort: ID ▼ "
+        );
+        assert_eq!(
+            list_title(12, 15, "", arrival, false, 80),
+            " Captures · 12 of 15 · unknown hidden "
+        );
         // A long filter is cut to the box, between its corners.
         let long = "protocol:acme serial:0a1b2c3 !status:unknown btn:unlock";
-        let cut = list_title(1, 15, long, by_serial, 70);
+        let cut = list_title(1, 15, long, by_serial, true, 70);
         assert_eq!(text::width(&cut), 68, "{cut}");
         assert!(cut.starts_with(" Captures · 1 of 15 · filter: protocol:acme") && cut.ends_with("… · sort: Serial ▼ "), "{cut}");
         // With no room for a few columns of it beside the sort, the sort goes (the header marks
         // it), then the filter's text.
-        let narrow = list_title(1, 15, long, by_serial, 50);
+        let narrow = list_title(1, 15, long, by_serial, true, 50);
         assert_eq!(text::width(&narrow), 48, "{narrow}");
         assert!(narrow.ends_with("… ") && !narrow.contains("sort"), "{narrow}");
-        assert_eq!(list_title(1, 15, long, by_serial, 30), " Captures · 1 of 15 ");
-        assert_eq!(list_title(1, 15, "ab", by_serial, 35), " Captures · 1 of 15 · filter: ab ");
-        assert_eq!(list_title(1, 15, "ab", by_serial, 34), " Captures · 1 of 15 ");
+        assert_eq!(list_title(1, 15, long, by_serial, true, 30), " Captures · 1 of 15 ");
+        assert_eq!(list_title(1, 15, "ab", by_serial, true, 35), " Captures · 1 of 15 · filter: ab ");
+        assert_eq!(list_title(1, 15, "ab", by_serial, true, 34), " Captures · 1 of 15 ");
     }
 
     #[test]
