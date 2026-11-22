@@ -116,9 +116,13 @@ KAT says so in words (see Troubleshooting).
 ## Pushing a `.sub` onto the Flipper
 
 From a capture's action menu, **Push to Flipper (/ext/subghz)** writes the Flipper key file
-(preferred) or a RAW `.sub` onto the SD card at `/ext/subghz/<name>.sub`, using the same USB
+(preferred) or a RAW `.sub` onto the SD card at `/ext/subghz/<name>_<id>.sub`, using the same USB
 console as receive and transmit (`storage write_chunk`). Close the Sub-GHz app (and qFlipper)
 first; then open Sub-GHz → Saved to find the file.
+
+**All at once:** `:pushflipper` (alias `:pushall`) pushes every capture the list currently shows
+(the filter and the Unknown toggle apply). The status line reports how many succeeded, how many
+were skipped (no key file and no raw pairs), and which IDs failed.
 
 **Bluetooth:** KAT talks to the Flipper only over USB CDC serial. On macOS a Flipper paired over
 Bluetooth does not expose a serial port KAT can open (qFlipper mobile uses Flipper's BLE RPC,
