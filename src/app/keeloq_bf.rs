@@ -71,7 +71,7 @@ impl App {
     }
 
     /// The captured frames of remote `serial`, one per hop code, oldest first.
-    fn keeloq_frames_of(&self, serial: u32) -> Vec<Frame> {
+    pub(super) fn keeloq_frames_of(&self, serial: u32) -> Vec<Frame> {
         let mut captures: Vec<&Capture> =
             self.captures.iter().filter(|c| is_keeloq(c) && c.serial == Some(serial)).collect();
         captures.sort_by_key(|c| c.id);

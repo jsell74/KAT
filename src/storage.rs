@@ -261,10 +261,9 @@ show_unknown_signals = {show_unknown_signals}
 ; 500 ms (one press still on the air) is merged.
 ignore_duplicates = {ignore_duplicates}
 
-; Recover the key of every capture a brute force can crack, without being asked: PSA frames
-; encrypted with TEA get ProtoPirate's BF1/BF2 search in the background (well under a second
-; each) and, when it finds the key, their serial, button and counter, so they can be exported
-; and transmitted. false: only the signal menu's "Recover key" runs it.
+; Recover the key of every capture a brute force can crack, without being asked: PSA (TEA),
+; KeeLoq magic-serial (needs two hop codes) and HiTag2 Hell (needs a second press) run in the
+; background. false: only the signal menu's "Recover key" starts them.
 autobf = {autobf}
 
 [radio]
