@@ -110,6 +110,18 @@ words. The command line of current firmwares (official 1.x, Momentum, RogueMaste
 `subghz` while an app is open on the Flipper, and when it cannot load that command from the SD card;
 KAT says so in words (see Troubleshooting).
 
+## Pushing a `.sub` onto the Flipper
+
+From a capture's action menu, **Push to Flipper (/ext/subghz)** writes the Flipper key file
+(preferred) or a RAW `.sub` onto the SD card at `/ext/subghz/<name>.sub`, using the same USB
+console as receive and transmit (`storage write_chunk`). Close the Sub-GHz app (and qFlipper)
+first; then open Sub-GHz → Saved to find the file.
+
+**Bluetooth:** KAT talks to the Flipper only over USB CDC serial. On macOS a Flipper paired over
+Bluetooth does not expose a serial port KAT can open (qFlipper mobile uses Flipper's BLE RPC,
+which KAT does not implement). Pushing SubGhz files over Bluetooth is therefore not available;
+plug the Flipper in with a data cable.
+
 ## Troubleshooting
 
 | Message | Meaning |
