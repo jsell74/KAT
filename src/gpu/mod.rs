@@ -17,6 +17,7 @@
 pub mod hitag2;
 pub mod keeloq;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 /// A ready GPU device and queue, plus the adapter's name for display.
@@ -29,9 +30,27 @@ pub struct Context {
 
 static CONTEXT: OnceLock<Option<Context>> = OnceLock::new();
 
-/// The shared GPU context, initialised once. `None` when no adapter could be opened (no GPU, no
-/// driver, a headless CI machine): callers then use the CPU path.
+/// Config / `:keydevice`: when false, KeeLoq and HiTag2 searches stay on the CPU even if a card
+/// is present (`key_search_device = cpu` in config.ini). Default true = use the GPU when usable.
+static PREFER_GPU: AtomicBool = AtomicBool::new(true);
+
+/// Prefer the GPU for key recovery (`true`) or force the CPU path (`false`). Safe to call at any
+/// time: an already-opened device is kept but ignored while preference is off.
+pub fn set_prefer_gpu(prefer: bool) {
+    PREFER_GPU.store(prefer, Ordering::Relaxed);
+}
+
+/// Whether key recovery is allowed to use the GPU (config / `:keydevice`).
+pub fn prefer_gpu() -> bool {
+    PREFER_GPU.load(Ordering::Relaxed)
+}
+
+/// The shared GPU context, initialised once. `None` when the user prefers CPU, or no adapter could
+/// be opened (no GPU, no driver, a headless CI machine): callers then use the CPU path.
 pub fn context() -> Option<&'static Context> {
+    if !prefer_gpu() {
+        return None;
+    }
     CONTEXT.get_or_init(|| pollster::block_on(init())).as_ref()
 }
 
@@ -62,16 +81,17 @@ async fn init() -> Option<Context> {
     Some(Context { device, queue, name: info.name, backend: info.backend })
 }
 
-/// Whether a usable GPU is present. Used by the GPU equivalence tests and the TUI recovery view.
+/// Whether a usable GPU is present **and** preferred. Used by the GPU equivalence tests and the
+/// TUI recovery view.
 #[allow(dead_code)]
 pub fn available() -> bool {
     context().is_some()
 }
 
-/// Whether the GPU is up already, without starting it: for the UI thread, which must not wait
-/// for a driver (a search brings the GPU up on its own thread, the first time one runs).
+/// Whether the GPU is up already and preferred, without starting it: for the UI thread, which must
+/// not wait for a driver (a search brings the GPU up on its own thread, the first time one runs).
 pub fn is_up() -> bool {
-    CONTEXT.get().is_some_and(Option::is_some)
+    prefer_gpu() && CONTEXT.get().is_some_and(Option::is_some)
 }
 
 /// A short description of the GPU KAT would use, e.g. for a startup line or `--help`.
