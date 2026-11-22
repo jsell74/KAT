@@ -74,8 +74,8 @@ pub const HELP_TEXT: &str = r#"KEYS
   /             Filter the list: words that must fit,
                 serial:1a2b, !word, #7 or id:3-9
   s  S          Sort by the next column / reverse
-  U             Show or hide Unknown + duplicates by serial
-                (show_unknown_signals / ignore_duplicates)
+  U             Show/hide Unknown + duplicates by serial
+                (show_unknown_signals / ignore_dups)
   i             Vehicle info (year, make, model …)
   d  u          Delete the capture / undo
                 (menu: Show key / Delete key /
