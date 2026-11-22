@@ -22,8 +22,11 @@ use anyhow::Result;
 
 use super::{App, ExportFormat, InputMode, RadioDevice, SignalAction};
 use super::files::safe_stem;
+use super::hitag2_bf::{self, Hitag2KeyReport};
 use crate::capture::{Capture, CaptureStatus};
 use crate::export::flipper;
+use crate::protocols::hitag2_keys;
+use crate::protocols::keeloq_common::keeloq_keystore;
 use crate::protocols::ProtocolRegistry;
 use crate::radio::devices::RadioKind;
 use crate::radio::SUBGHZ_DIR;
@@ -110,10 +113,200 @@ pub(super) fn fit_encoder_status(registry: &ProtocolRegistry, capture: &mut Capt
     }
 }
 
+/// Whether the signal menu offers "Show key": protocol known (Decoded / Encode).
+pub(super) fn show_key_offered(capture: &Capture) -> bool {
+    matches!(
+        capture.status,
+        CaptureStatus::Decoded | CaptureStatus::EncoderCapable
+    ) && capture.protocol.is_some()
+}
+
+/// Whether "Delete key" is offered: a HiTag2 UID key in `hitag2_keys`, or a KeeLoq `BF_<serial>`.
+pub(super) fn delete_key_offered(capture: &Capture) -> bool {
+    if let Ok(frame) = hitag2_bf::frame_of(capture) {
+        if hitag2_keys::find(frame.uid).and_then(|r| r.key).is_some() {
+            return true;
+        }
+    }
+    if let Some(serial) = capture.serial {
+        let name = format!("BF_{serial:07X}");
+        if keeloq_keystore().iter().any(|e| e.name == name) {
+            return true;
+        }
+    }
+    false
+}
+
+/// KeeLoq manufacturer / recovered (`BF_<serial>`) key line, if the keystore has it.
+fn keeloq_key_line(capture: &Capture) -> Option<String> {
+    if let Some(serial) = capture.serial {
+        let name = format!("BF_{serial:07X}");
+        if let Some(e) = keeloq_keystore().iter().find(|e| e.name == name) {
+            return Some(format!("KeeLoq recovered key {name}: {:016X}", e.key));
+        }
+    }
+    let proto = capture.protocol.as_deref()?;
+    let mf = proto.strip_prefix("KeeLoq (")?.strip_suffix(')')?;
+    if mf.eq_ignore_ascii_case("Unknown") {
+        return None;
+    }
+    let e = keeloq_keystore().iter().find(|e| e.name == mf)?;
+    Some(format!("KeeLoq manufacturer key ({mf}): {:016X}", e.key))
+}
+
+/// Flipper `Key:` bytes as spaced hex, when the protocol writes a key file.
+fn flipper_key_line(capture: &Capture, protocols: &ProtocolRegistry) -> Option<String> {
+    let key = flipper::capture_flipper_key(capture, protocols)?;
+    let hex = if key.key_bytes.is_empty() {
+        format!("{:016X}", key.key)
+    } else {
+        key.key_bytes.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ")
+    };
+    let mut line = format!("Flipper Key: {hex}");
+    if let Some((_, v)) = key.fields.iter().find(|(n, _)| n.eq_ignore_ascii_case("Hitag2 Key")) {
+        line.push_str(&format!(" · Hitag2 Key: {v}"));
+    }
+    if let Some((_, v)) = key.fields.iter().find(|(n, _)| n.eq_ignore_ascii_case("Manufacture")) {
+        line.push_str(&format!(" · Manufacture: {v}"));
+    }
+    Some(line)
+}
+
+/// Status-line text for "Show key" (crypto key when known, else frame Key/Data).
+pub(super) fn capture_key_status_text(capture: &Capture, protocols: &ProtocolRegistry) -> String {
+    let mut parts = Vec::new();
+    if let Some(line) = keeloq_key_line(capture) {
+        parts.push(line);
+    }
+    if let Some(shown) = hitag2_keys::shown_key(capture.protocol_name(), &capture.decoded_signal()) {
+        parts.push(format!("HiTag2: {}", hitag2_keys::hex(&shown.standard, "")));
+        if let Some(fiat) = shown.fiat_order() {
+            parts.push(format!("Fiat order: {}", hitag2_keys::hex(&fiat, "")));
+        }
+    }
+    if let Some(line) = flipper_key_line(capture, protocols) {
+        parts.push(line);
+    }
+    if parts.is_empty() {
+        if capture.data_count_bit > 0 {
+            format!(
+                "#{:02} {}: Key/Data 0x{} ({} bits)",
+                capture.id,
+                capture.protocol_name(),
+                capture.data_hex(),
+                capture.data_count_bit
+            )
+        } else {
+            format!("#{:02} {}: no key stored on this capture", capture.id, capture.protocol_name())
+        }
+    } else {
+        format!("#{:02} {}: {}", capture.id, capture.protocol_name(), parts.join(" · "))
+    }
+}
+
 impl App {
     /// Whether the capture's protocol writes it as a Flipper key file.
     pub fn can_export_flipper_key(&self, capture: &Capture) -> bool {
         flipper::capture_flipper_key(capture, &self.protocols).is_some()
+    }
+
+    /// Insert "Show key" / "Delete key" just before "Delete signal" when the capture is decoded.
+    pub(super) fn insert_key_menu_actions(&self, actions: &mut Vec<SignalAction>) {
+        let Some(c) = self.signal_menu_capture() else { return };
+        let at = actions
+            .iter()
+            .position(|a| matches!(a, SignalAction::Delete))
+            .unwrap_or(actions.len());
+        let mut insert_at = at;
+        if show_key_offered(c) && !actions.iter().any(|a| matches!(a, SignalAction::ShowKey)) {
+            actions.insert(insert_at, SignalAction::ShowKey);
+            insert_at += 1;
+        }
+        if delete_key_offered(c) && !actions.iter().any(|a| matches!(a, SignalAction::DeleteKey)) {
+            actions.insert(insert_at, SignalAction::DeleteKey);
+        }
+    }
+
+    /// "Show key": Hitag2 opens the key overlay when known; otherwise the status line carries the
+    /// manufacturer / Flipper / Key/Data hex.
+    pub fn show_capture_key(&mut self, id: u32) {
+        let Some(capture) = self.captures.iter().find(|c| c.id == id).cloned() else {
+            self.last_error = Some(format!("Capture #{id:02} not found"));
+            return;
+        };
+        if let (Ok(frame), Some(shown)) = (
+            hitag2_bf::frame_of(&capture),
+            self.hitag2_shown_key(&capture),
+        ) {
+            self.hitag2_key_report = Some(Hitag2KeyReport {
+                uid: frame.uid,
+                remote: frame.remote,
+                key: shown,
+                took: "already known".to_string(),
+                saved: "from hitag2_keys / this session".to_string(),
+                captures: 1,
+            });
+            self.overlay_scroll = 0;
+            self.input_mode = InputMode::Hitag2Key;
+            self.status_message = Some(format!(
+                "HiTag2 key of remote {:08X}: {}",
+                frame.uid,
+                hitag2_keys::hex(&shown.standard, "")
+            ));
+            return;
+        }
+        self.status_message = Some(capture_key_status_text(&capture, &self.protocols));
+    }
+
+    /// "Delete key": drop the saved HiTag2 / KeeLoq `BF_<serial>` key for this remote (not the
+    /// capture row). Embedded manufacturer keys stay.
+    pub fn delete_capture_key(&mut self, id: u32) {
+        let Some(capture) = self.captures.iter().find(|c| c.id == id).cloned() else {
+            self.last_error = Some(format!("Capture #{id:02} not found"));
+            return;
+        };
+        let mut done: Vec<String> = Vec::new();
+
+        if let Ok(frame) = hitag2_bf::frame_of(&capture) {
+            if hitag2_keys::forget_key(frame.uid) {
+                done.push(format!("HiTag2 UID {:08X}", frame.uid));
+                for c in self.captures.iter_mut() {
+                    if hitag2_bf::frame_of(c).is_ok_and(|f| f.uid == frame.uid) {
+                        c.key_recovery = None;
+                    }
+                }
+                self.hitag2_key_memo.set(None);
+                self.hitag2_offer_memo.set(None);
+            }
+        }
+
+        if let Some(serial) = capture.serial {
+            let name = format!("BF_{serial:07X}");
+            let removed = crate::protocols::keeloq_common::remove_keeloq_keys(&[name.as_str()]);
+            let file_removed = crate::keystore::remove_user_keys(self.storage.config_dir(), &[name.as_str()])
+                .unwrap_or(0);
+            if removed > 0 || file_removed > 0 {
+                done.push(name.clone());
+                for c in self.captures.iter_mut() {
+                    if c.serial == Some(serial) {
+                        c.key_recovery = None;
+                    }
+                }
+            }
+        }
+
+        if done.is_empty() {
+            self.last_error = Some(
+                "No saved key to delete for this signal (only HiTag2 UID keys and KeeLoq BF_<serial> recovered keys)"
+                    .to_string(),
+            );
+        } else {
+            self.status_message = Some(format!(
+                "Deleted key{}: {} (signal kept — use Delete signal to remove the capture)",
+                if done.len() == 1 { "" } else { "s" },
+                done.join(", ")
+            ));
+        }
     }
 
     /// Fit the signal menu to the selected capture: without raw pairs, no Replay, no RAW `.sub`
@@ -278,6 +471,18 @@ impl App {
 mod tests {
     use super::*;
     use crate::capture::StoredLevelDuration;
+
+    #[test]
+    fn show_key_is_for_decoded_captures_only() {
+        let mut c = Capture::from_pairs(1, 433_920_000, Vec::new());
+        assert!(!show_key_offered(&c));
+        c.protocol = Some("Acme".into());
+        c.status = CaptureStatus::Decoded;
+        assert!(show_key_offered(&c));
+        c.status = CaptureStatus::EncoderCapable;
+        assert!(show_key_offered(&c));
+        assert!(!delete_key_offered(&c), "no saved HiTag2/BF key");
+    }
 
     #[test]
     fn push_payload_names_include_the_capture_id() {
