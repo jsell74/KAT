@@ -51,7 +51,7 @@ pub struct Hitag2KeyReport {
 pub(super) struct Hitag2BfJob {
     /// The capture it was started from, then the second press it pairs with.
     pub(super) capture_ids: [u32; 2],
-    uid: u32,
+    pub(super) uid: u32,
     /// The first capture's protocol: the key is saved in that protocol's byte order.
     remote: Hitag2Remote,
     pub(super) ctl: Arc<BruteForceControl>,
