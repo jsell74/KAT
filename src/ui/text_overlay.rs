@@ -74,7 +74,7 @@ pub const HELP_TEXT: &str = r#"KEYS
   /             Filter the list: words that must fit,
                 serial:1a2b, !word, #7 or id:3-9
   s  S          Sort by the next column / reverse
-  U             Show or hide Unknown + duplicates
+  U             Show or hide Unknown + duplicates by serial
                 (show_unknown_signals / ignore_duplicates)
   i             Vehicle info (year, make, model …)
   d  u          Delete the capture / undo
@@ -121,7 +121,7 @@ COMMANDS   (ID: 4  #4  1,3,5  1 3 5  1-5)
   :filter [words]      Show the captures that fit
                        (:filter alone: all of them)
   :unknown [on|off]    Show or hide Unknown + duplicates
-                       (U toggles; config.ini pair)
+                       by serial (U; config.ini pair)
   :pushflipper         Push every shown capture's .sub
                        to the Flipper (/ext/subghz, USB)
   :sort [column] [desc]
