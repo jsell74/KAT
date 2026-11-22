@@ -536,11 +536,11 @@ fn radios_compact_line(cols: &[RadioColumns], width: usize) -> Line<'static> {
 /// shorter ones leave some out, one more each. An 80-column terminal's bar keeps Tab (nothing
 /// else on screen says where the settings are) rather than `a`, which the Enter menu offers too.
 const NORMAL_KEYS: [&str; 9] = [
-    "?: Help | ↑↓: Select | Enter: Actions | a: Analyze | c: Compare | /: Filter | s: Sort | i: Info | d: Delete | r: RX | Tab: Settings | :: Command | q: Quit",
-    "?: Help | Enter: Actions | a: Analyze | c: Compare | /: Filter | s: Sort | i: Info | d: Delete | r: RX | Tab: Settings | :: Command | q: Quit",
-    "?: Help | Enter: Actions | a: Analyze | c: Compare | /: Filter | i: Info | d: Delete | r: RX | Tab: Settings | :: Command | q: Quit",
-    "?: Help | Enter: Actions | a: Analyze | /: Filter | i: Info | d: Delete | r: RX | Tab: Settings | :: Command | q: Quit",
-    "?: Help | Enter: Actions | a: Analyze | /: Filter | i: Info | r: RX | Tab: Settings | :: Command | q: Quit",
+    "?: Help | ↑↓: Select | Enter: Actions | a: Analyze | c: Compare | /: Filter | U: Unknown | s: Sort | i: Info | d: Delete | r: RX | Tab: Settings | :: Command | q: Quit",
+    "?: Help | Enter: Actions | a: Analyze | c: Compare | /: Filter | U: Unknown | s: Sort | i: Info | d: Delete | r: RX | Tab: Settings | :: Command | q: Quit",
+    "?: Help | Enter: Actions | a: Analyze | c: Compare | /: Filter | U: Unknown | i: Info | d: Delete | r: RX | Tab: Settings | :: Command | q: Quit",
+    "?: Help | Enter: Actions | a: Analyze | /: Filter | U: Unknown | i: Info | d: Delete | r: RX | Tab: Settings | :: Command | q: Quit",
+    "?: Help | Enter: Actions | a: Analyze | /: Filter | U: Unknown | r: RX | Tab: Settings | :: Command | q: Quit",
     "?: Help | Enter: Actions | a: Analyze | /: Filter | r: RX | Tab: Settings | :: Command | q: Quit",
     "?: Help | Enter: Actions | a: Analyze | r: RX | Tab: Settings | :: Command | q: Quit",
     "?: Help | Enter: Actions | r: RX | Tab: Settings | :: Command | q: Quit",
@@ -550,9 +550,9 @@ const NORMAL_KEYS: [&str; 9] = [
 /// fills fast, so the filter's key stays longer than `a`. At 80 columns `1-9` goes before Tab
 /// does: the settings bar's Radio tab chooses the radio as well.
 const NORMAL_KEYS_RADIOS: [&str; 9] = [
-    "?: Help | Enter: Actions | a: Analyze | c: Compare | /: Filter | s: Sort | 1-9: Radio | r: RX | R: RX all | Tab: Settings | :radios | :: Command | q: Quit",
-    "?: Help | Enter: Actions | a: Analyze | c: Compare | /: Filter | 1-9: Radio | r: RX | R: RX all | Tab: Settings | :radios | :: Command | q: Quit",
-    "?: Help | Enter: Actions | a: Analyze | /: Filter | 1-9: Radio | r: RX | R: RX all | Tab: Settings | :radios | :: Command | q: Quit",
+    "?: Help | Enter: Actions | a: Analyze | c: Compare | /: Filter | U: Unknown | s: Sort | 1-9: Radio | r: RX | R: RX all | Tab: Settings | :radios | :: Command | q: Quit",
+    "?: Help | Enter: Actions | a: Analyze | c: Compare | /: Filter | U: Unknown | 1-9: Radio | r: RX | R: RX all | Tab: Settings | :radios | :: Command | q: Quit",
+    "?: Help | Enter: Actions | a: Analyze | /: Filter | U: Unknown | 1-9: Radio | r: RX | R: RX all | Tab: Settings | :radios | :: Command | q: Quit",
     "?: Help | Enter: Actions | a: Analyze | /: Filter | 1-9: Radio | r: RX | R: RX all | Tab: Settings | :: Command | q: Quit",
     "?: Help | Enter: Actions | /: Filter | 1-9: Radio | r: RX | R: RX all | Tab: Settings | :: Command | q: Quit",
     "?: Help | Enter: Actions | 1-9: Radio | r: RX | R: RX all | Tab: Settings | :: Command | q: Quit",
