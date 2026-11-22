@@ -13,18 +13,31 @@
 //! - **Export**: [`App::export_flipper_key`] / [`App::complete_flipper_key_export`] write
 //!   `<name>_key.sub` (so it does not take the RAW export's name) with the protocol's
 //!   `to_flipper_key` (its reference's `serialize`), never over an existing file.
+//! - **Push to Flipper**: [`App::push_to_flipper`] writes the key file (or RAW `.sub`) onto the
+//!   Flipper's SD card at `/ext/subghz/…` over the USB console. Bluetooth file transfer is not
+//!   supported on macOS (no CDC serial over BLE); USB is the path KAT already uses.
 
 use anyhow::Result;
 
-use super::{App, ExportFormat, InputMode, SignalAction};
+use super::{App, ExportFormat, InputMode, RadioDevice, SignalAction};
+use super::files::safe_stem;
 use crate::capture::{Capture, CaptureStatus};
 use crate::export::flipper;
 use crate::protocols::ProtocolRegistry;
+use crate::radio::devices::RadioKind;
+use crate::radio::SUBGHZ_DIR;
 
 /// The signal menu for a capture: without raw pairs no Replay, no RAW `.sub` export and no timing
 /// analysis (they need the pairs); "Export Flipper key" right after the RAW export's place (or
 /// the `.fob` export's) when `key_file` (the protocol writes the capture as a key file).
-pub(super) fn fit_signal_actions(actions: &mut Vec<SignalAction>, has_raw: bool, key_file: bool) {
+/// `push_flipper`: a Flipper Zero is plugged in, so "Push to Flipper" is offered when a key or
+/// RAW `.sub` can be written.
+pub(super) fn fit_signal_actions(
+    actions: &mut Vec<SignalAction>,
+    has_raw: bool,
+    key_file: bool,
+    push_flipper: bool,
+) {
     if !has_raw {
         actions.retain(|a| !matches!(a, SignalAction::Replay | SignalAction::ExportFlipper | SignalAction::Analyze));
     }
@@ -35,6 +48,19 @@ pub(super) fn fit_signal_actions(actions: &mut Vec<SignalAction>, has_raw: bool,
             .or_else(|| actions.iter().position(|a| matches!(a, SignalAction::ExportFob)))
             .map_or(actions.len(), |i| i + 1);
         actions.insert(at, SignalAction::ExportFlipperKey);
+    }
+    if push_flipper && (key_file || has_raw) {
+        // After the last Flipper export action (key file preferred over RAW).
+        let at = actions
+            .iter()
+            .rposition(|a| {
+                matches!(
+                    a,
+                    SignalAction::ExportFlipperKey | SignalAction::ExportFlipper | SignalAction::ExportFob
+                )
+            })
+            .map_or(actions.len(), |i| i + 1);
+        actions.insert(at, SignalAction::PushToFlipper);
     }
 }
 
@@ -64,10 +90,70 @@ impl App {
 
     /// Fit the signal menu to the selected capture: without raw pairs, no Replay, no RAW `.sub`
     /// export and no Analyze; "Export Flipper key" (after the RAW export's place) when
-    /// the protocol writes key files.
+    /// the protocol writes key files; "Push to Flipper" when a Flipper is available.
     pub(super) fn adjust_signal_actions(&self, actions: &mut Vec<SignalAction>) {
-        if let Some(c) = self.selected_capture.and_then(|idx| self.captures.get(idx)) {
-            fit_signal_actions(actions, c.has_raw_data(), self.can_export_flipper_key(c));
+        if let Some(c) = self.signal_menu_capture() {
+            let push = self.radios.iter().any(|r| r.kind() == RadioKind::Flipper);
+            fit_signal_actions(actions, c.has_raw_data(), self.can_export_flipper_key(c), push);
+        }
+    }
+
+    /// The Flipper to push files to: the TX radio when it is a Flipper, else the first Flipper.
+    fn flipper_for_push(&mut self) -> Option<&mut crate::radio::FlipperController> {
+        let prefer = self.tx_radio().filter(|&i| self.radios[i].kind() == RadioKind::Flipper);
+        let i = prefer.or_else(|| self.radios.iter().position(|r| r.kind() == RadioKind::Flipper))?;
+        match &mut self.radios[i].device {
+            RadioDevice::Flipper(f) => Some(f),
+            _ => None,
+        }
+    }
+
+    /// Push the capture's Flipper key file (preferred) or RAW `.sub` onto the Flipper's SD card
+    /// at `/ext/subghz/<name>.sub` over USB. Bluetooth is not used (see module docs).
+    pub fn push_to_flipper(&mut self, id: u32) {
+        let Some(capture) = self.captures.iter().find(|c| c.id == id).cloned() else {
+            self.last_error = Some(format!("Capture #{id:02} not found"));
+            return;
+        };
+        let (bytes, kind) = match flipper::capture_flipper_key(&capture, &self.protocols) {
+            Some(key) => (key.to_text().into_bytes(), "key"),
+            None if capture.has_raw_data() => match flipper::flipper_sub_text(&capture) {
+                Ok(text) => (text.into_bytes(), "RAW"),
+                Err(e) => {
+                    self.last_error = Some(format!("Could not build .sub: {e:#}"));
+                    return;
+                }
+            },
+            None => {
+                self.last_error = Some(format!(
+                    "{} has no Flipper key file and no raw pairs to push",
+                    capture.protocol_name()
+                ));
+                return;
+            }
+        };
+        let stem = if kind == "key" {
+            format!("{}_key", Self::default_export_filename(&capture))
+        } else {
+            Self::default_export_filename(&capture)
+        };
+        let name = format!("{}.sub", safe_stem(&stem));
+        let path = format!("{SUBGHZ_DIR}/{name}");
+        let Some(flipper) = self.flipper_for_push() else {
+            self.last_error = Some(
+                "No Flipper Zero on USB (close qFlipper, plug it in, then :radios). \
+                 Bluetooth push is not supported on macOS."
+                    .to_string(),
+            );
+            return;
+        };
+        match flipper.write_sd_file(&path, &bytes) {
+            Ok(()) => {
+                self.status_message = Some(format!("Pushed {kind} .sub to Flipper {path} (USB)"));
+            }
+            Err(e) => {
+                self.last_error = Some(format!("Push to Flipper failed: {e:#}"));
+            }
         }
     }
 
@@ -125,21 +211,30 @@ mod tests {
         use SignalAction::*;
         let car = SignalAction::ALL.to_vec();
         let mut a = car.clone();
-        fit_signal_actions(&mut a, true, false);
+        fit_signal_actions(&mut a, true, false, false);
         assert_eq!(a, car);
         let mut a = car.clone();
-        fit_signal_actions(&mut a, true, true);
+        fit_signal_actions(&mut a, true, true, false);
         assert_eq!(a, [Replay, Lock, Unlock, Trunk, Panic, ExportFob, ExportFlipper, ExportFlipperKey, Analyze, Delete]);
         let mut a = car.clone();
-        fit_signal_actions(&mut a, false, true);
+        fit_signal_actions(&mut a, false, true, false);
         assert_eq!(a, [Lock, Unlock, Trunk, Panic, ExportFob, ExportFlipperKey, Delete]);
         let gate = vec![Replay, SendNextCode, ExportFob, ExportFlipper, Analyze, Delete];
         let mut a = gate.clone();
-        fit_signal_actions(&mut a, false, true);
+        fit_signal_actions(&mut a, false, true, false);
         assert_eq!(a, [SendNextCode, ExportFob, ExportFlipperKey, Delete]);
         let mut a = vec![ExportFob, ExportFlipper, Analyze, Delete];
-        fit_signal_actions(&mut a, false, false);
+        fit_signal_actions(&mut a, false, false, false);
         assert_eq!(a, [ExportFob, Delete]);
+        let mut a = car.clone();
+        fit_signal_actions(&mut a, true, true, true);
+        assert_eq!(
+            a,
+            [
+                Replay, Lock, Unlock, Trunk, Panic, ExportFob, ExportFlipper, ExportFlipperKey, PushToFlipper,
+                Analyze, Delete
+            ]
+        );
     }
 
     /// The default export name never contains a path separator (makes such as "Kia/Hyundai").
