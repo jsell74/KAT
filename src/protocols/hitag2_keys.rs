@@ -326,6 +326,48 @@ pub fn adopt_file_key(uid: u32, key: [u8; 6], epoch: u32) {
     }
 }
 
+/// Drop the saved key for remote `uid` from this session and from `hitag2_keys.txt` (seed kept if
+/// any). Returns whether a key was removed. Embedded firmware keys (not in this file) stay.
+pub fn forget_key(uid: u32) -> bool {
+    if !uid_ok(uid) {
+        return false;
+    }
+    let had = find(uid).and_then(|r| r.key).is_some();
+    if !had {
+        return false;
+    }
+    let seed = find(uid).and_then(|r| r.seed);
+    {
+        let mut db = DB.write().unwrap_or_else(|e| e.into_inner());
+        db.retain(|(u, _)| *u != uid);
+        if let Some(seed) = seed {
+            db.push((uid, Record { key: None, epoch: 0, seed: Some(seed) }));
+        }
+        GENERATION.fetch_add(1, Ordering::Relaxed);
+    }
+    let dir = CONFIG_DIR.read().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(dir) = dir {
+        let path = dir.join(FILE_NAME);
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            let mut out = String::new();
+            let mut wrote_seed = false;
+            for line in text.lines() {
+                if parse_line(line).is_some_and(|(u, _)| u == uid) {
+                    if let Some(seed) = seed.filter(|_| !wrote_seed) {
+                        out.push_str(&format_line(uid, &Record { key: None, epoch: 0, seed: Some(seed) }));
+                        wrote_seed = true;
+                    }
+                    continue;
+                }
+                out.push_str(line);
+                out.push('\n');
+            }
+            let _ = std::fs::write(&path, out);
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -369,6 +411,19 @@ pub(crate) mod tests {
         assert_eq!(KeyOrder::FiatBcm.arrange(std_key), [3, 4, 5, 6, 1, 2]);
         assert_eq!(KeyOrder::FiatBcm.standard([3, 4, 5, 6, 1, 2]), std_key);
         assert_eq!(KeyOrder::Standard.arrange(std_key), std_key);
+    }
+
+    /// `forget_key` drops the key but keeps a seed-only record.
+    #[test]
+    fn forget_key_keeps_the_seed() {
+        let uid = 0x5EED_0009;
+        remember(uid, Record { key: Some([9, 8, 7, 6, 5, 4]), epoch: 2, seed: Some(0x11) });
+        assert!(forget_key(uid));
+        assert_eq!(find(uid), Some(Record { key: None, epoch: 0, seed: Some(0x11) }));
+        assert!(!forget_key(uid), "no key left");
+        remember(uid, Record { key: Some([1; 6]), epoch: 0, seed: None });
+        assert!(forget_key(uid));
+        assert_eq!(find(uid), None);
     }
 
     /// A key from a key file: the remote uses it for the session (the tests have no config

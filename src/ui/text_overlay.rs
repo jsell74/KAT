@@ -78,6 +78,8 @@ pub const HELP_TEXT: &str = r#"KEYS
                 (show_unknown_signals / ignore_duplicates)
   i             Vehicle info (year, make, model …)
   d  u          Delete the capture / undo
+                (menu: Show key / Delete key /
+                Delete signal on a decoded capture)
   r             Start or stop receiving
   R             Start or stop every radio
   1-9           Select a radio (several radios)
