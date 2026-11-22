@@ -81,6 +81,39 @@ pub fn load_user_keystore(config_dir: &std::path::Path) -> Option<String> {
     Some(msg)
 }
 
+/// Remove every `KEY:TYPE:NAME` line whose name is in `names` from `<config dir>/keeloq_mfcodes_user`.
+/// Returns how many lines were dropped (0 if the file is missing).
+pub fn remove_user_keys(config_dir: &std::path::Path, names: &[&str]) -> std::io::Result<usize> {
+    let path = config_dir.join(USER_KEYSTORE_FILE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    let mut removed = 0usize;
+    let mut out = String::new();
+    for line in text.lines() {
+        let is_key = line.contains(':')
+            && !line.starts_with("Filetype:")
+            && !line.starts_with("Version:")
+            && !line.starts_with("Encryption:")
+            && !line.starts_with('#');
+        if is_key {
+            let name = line.split(':').nth(2).map(str::trim).unwrap_or("");
+            if names.iter().any(|n| *n == name) {
+                removed += 1;
+                continue;
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if removed > 0 {
+        std::fs::write(&path, out)?;
+    }
+    Ok(removed)
+}
+
 /// Append a key to `<config dir>/keeloq_mfcodes_user` (`KEY:TYPE:NAME`, as the Flipper's user
 /// keystore), creating the file with the Flipper header when it doesn't exist. Returns the path; an
 /// identical line already in the file is not written again.
