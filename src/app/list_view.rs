@@ -266,8 +266,9 @@ fn term_fits(term: &Term, c: &Capture) -> bool {
 
 /// The captures the list shows under `filter` and `sort`: indexes into `captures`, in the order
 /// of the list's rows. With `show_unknown` false (config `show_unknown_signals`), Unknown captures
-/// are left out. With `hide_duplicates` true (config `ignore_duplicates`), later copies of the same
-/// decoded signal are left out too (the first kept wins), matching receive-time de-duplication.
+/// are left out. With `hide_duplicates` true (config `ignore_duplicates`), later rows that share
+/// the same serial as an earlier kept row are left out (one row per remote serial; first wins).
+/// Captures without a serial are not collapsed this way. Receive/import still keeps every press.
 pub(super) fn visible(
     captures: &[Capture],
     filter: &str,
@@ -287,7 +288,7 @@ pub(super) fn visible(
         if hide_duplicates
             && rows
                 .iter()
-                .any(|&j| super::files::same_decoded_signal(&captures[j], &captures[i]))
+                .any(|&j| super::files::same_remote_by_serial(&captures[j], &captures[i]))
         {
             continue;
         }
@@ -468,9 +469,9 @@ impl App {
         match self.storage.save_config() {
             Ok(()) => {
                 self.status_message = Some(if show {
-                    "Unknown and duplicates shown (U hides · saved in config.ini)".to_string()
+                    "Unknown and duplicates by serial shown (U hides · saved in config.ini)".to_string()
                 } else {
-                    "Unknown and duplicates hidden (U shows · saved in config.ini)".to_string()
+                    "Unknown and duplicates by serial hidden (U shows · saved in config.ini)".to_string()
                 });
             }
             Err(e) => {
@@ -681,15 +682,30 @@ mod tests {
         assert!(visible(&list, "unknown", Sort::default(), false, false).is_empty());
     }
 
+    /// List duplicates are by serial: later presses of the same remote (different button/counter)
+    /// collapse to the first row; a different serial stays visible. No serial → not collapsed.
     #[test]
-    fn duplicate_captures_can_be_hidden() {
+    fn list_duplicates_are_by_serial() {
         let mut list = list();
-        // A second Acme V2 with the same fields as #1 (index 0): a duplicate.
+        // #1 and #3 already share serial 0x0A1B2C3 (Lock then Unlock): hide_duplicates keeps #1 only.
+        assert_eq!(visible(&list, "", Sort::default(), true, false).len(), 6);
+        assert_eq!(visible(&list, "", Sort::default(), true, true), vec![0, 1, 3, 4, 5]);
+        // Exact clone of #1: still one row for that serial.
         let mut dup = list[0].clone();
         dup.id = 99;
         list.push(dup);
         assert_eq!(visible(&list, "", Sort::default(), true, false).len(), 7);
-        assert_eq!(visible(&list, "", Sort::default(), true, true), vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(visible(&list, "", Sort::default(), true, true), vec![0, 1, 3, 4, 5]);
+        // Another press of #2's serial with a new counter: still one row for that serial.
+        let mut again = list[1].clone();
+        again.id = 7;
+        again.counter = Some(0x0201);
+        again.button = Some(0x01);
+        list.push(again);
+        assert_eq!(visible(&list, "", Sort::default(), true, true), vec![0, 1, 3, 4, 5]);
+        // Two Unknowns without serial both stay (serial rule does not merge them).
+        list.push(Capture::from_pairs(8, 433_920_000, Vec::new()));
+        assert_eq!(visible(&list, "", Sort::default(), true, true), vec![0, 1, 3, 4, 5, 8]);
     }
 
     #[test]
