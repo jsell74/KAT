@@ -880,14 +880,15 @@ impl App {
             // What the list shows, and in which order (app/list_view.rs)
             "filter" => self.filter_command(rest),
             "sort" => self.sort_command(&args),
-            // Same switch as config.ini `show_unknown_signals` (U toggles it).
+            // U / :unknown: Unknown + duplicates together (show_unknown_signals / ignore_duplicates).
             "unknown" => match args.first().map(|a| a.to_ascii_lowercase()).as_deref() {
                 None => self.toggle_show_unknown(),
                 Some("on" | "1" | "true" | "yes" | "show") => self.set_show_unknown(true),
                 Some("off" | "0" | "false" | "no" | "hide") => self.set_show_unknown(false),
                 Some(_) => {
-                    self.last_error =
-                        Some("Usage: :unknown [on|off] (U toggles; same as show_unknown_signals)".to_string());
+                    self.last_error = Some(
+                        "Usage: :unknown [on|off] (U toggles Unknown + duplicates in config.ini)".to_string(),
+                    );
                 }
             },
             // Every capture the list shows → `/ext/subghz` on a Flipper over USB.
@@ -1482,6 +1483,27 @@ impl App {
                 .copied()
                 .collect()
         }
+    }
+
+    /// Whether Enter on the highlighted action should leave the menu open (TX / emulate / push /
+    /// key recovery): Esc closes; export, analyze and delete leave as before.
+    pub fn signal_action_keeps_menu(&self) -> bool {
+        matches!(
+            self.available_signal_actions().get(self.signal_menu_index),
+            Some(
+                SignalAction::Replay
+                    | SignalAction::SendNextCode
+                    | SignalAction::Lock
+                    | SignalAction::Unlock
+                    | SignalAction::Trunk
+                    | SignalAction::Panic
+                    | SignalAction::PushToFlipper
+                    | SignalAction::RecoverKey
+                    | SignalAction::RecoverKeeloqKey
+                    | SignalAction::RecoverHitag2Key
+                    | SignalAction::CancelKeyRecovery
+            )
+        )
     }
 
     /// Execute the highlighted signal action on the menu's capture
