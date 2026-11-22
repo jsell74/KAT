@@ -54,7 +54,7 @@ pub(super) fn export_file(dir: &Path, typed: &str, ext: &str) -> PathBuf {
     crate::export::unique_path(&dir.join(name))
 }
 
-/// Whether the list already has this signal (same protocol, data, serial, button and counter).
+/// Whether two decoded captures are the same signal (protocol, data, serial, button, counter).
 /// Unknown signals (no protocol) are never duplicates, so they can be kept for research.
 ///
 /// `data` is the first 64 bits of a frame: in a longer one (Honda V5's 135 bits, Ford V1,
@@ -62,15 +62,18 @@ pub(super) fn export_file(dir: &Path, typed: &str, ext: &str) -> PathBuf {
 /// first and was left out. The counter tells the presses apart. The rest of the frame
 /// (`data_extra`) is not compared: in some protocols it changes with every repeat of one press
 /// (Somfy Keytis), which would list a press several times.
+pub(super) fn same_decoded_signal(a: &Capture, b: &Capture) -> bool {
+    b.protocol.is_some()
+        && a.protocol == b.protocol
+        && a.data == b.data
+        && a.serial == b.serial
+        && a.button == b.button
+        && a.counter == b.counter
+}
+
+/// Whether the list already has this signal ([same_decoded_signal]).
 pub(super) fn is_duplicate(captures: &[Capture], capture: &Capture) -> bool {
-    capture.protocol.is_some()
-        && captures.iter().any(|c| {
-            c.protocol == capture.protocol
-                && c.data == capture.data
-                && c.serial == capture.serial
-                && c.button == capture.button
-                && c.counter == capture.counter
-        })
+    captures.iter().any(|c| same_decoded_signal(c, capture))
 }
 
 impl App {

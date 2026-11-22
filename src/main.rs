@@ -592,10 +592,12 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut A
                             KeyCode::Up | KeyCode::Char('k') => app.signal_menu_move(false),
                             KeyCode::Down | KeyCode::Char('j') => app.signal_menu_move(true),
                             KeyCode::Enter => {
+                                // TX / emulate keeps the menu open so another send needs no
+                                // Enter on the list again; Esc (or Enter on a leaving action)
+                                // returns to the captures list.
+                                let keep = app.signal_action_keeps_menu();
                                 report!(app, app.execute_signal_action());
-                                // Only return to Normal if the action didn't change
-                                // input mode (e.g. ExportFob sets FobMetaYear)
-                                if app.input_mode == InputMode::SignalMenu {
+                                if app.input_mode == InputMode::SignalMenu && !keep {
                                     app.input_mode = InputMode::Normal;
                                 }
                             }
