@@ -21,7 +21,7 @@
 use crossterm::event::KeyCode;
 
 use super::{App, InputMode};
-use crate::capture::Capture;
+use crate::capture::{Capture, CaptureStatus};
 use crate::radio::hopper::format_mhz;
 
 /// A column of the list, or the vehicle and the file a capture carries besides: what `:sort` and
@@ -265,11 +265,16 @@ fn term_fits(term: &Term, c: &Capture) -> bool {
 }
 
 /// The captures the list shows under `filter` and `sort`: indexes into `captures`, in the order
-/// of the list's rows.
-pub(super) fn visible(captures: &[Capture], filter: &str, sort: Sort) -> Vec<usize> {
+/// of the list's rows. With `show_unknown` false (config `show_unknown_signals`), Unknown captures
+/// are left out of the view as well as of live receive and imports.
+pub(super) fn visible(captures: &[Capture], filter: &str, sort: Sort, show_unknown: bool) -> Vec<usize> {
     let terms = terms(filter);
-    let mut rows: Vec<usize> =
-        (0..captures.len()).filter(|&i| terms.iter().all(|term| term_fits(term, &captures[i]))).collect();
+    let mut rows: Vec<usize> = (0..captures.len())
+        .filter(|&i| {
+            (show_unknown || captures[i].status != CaptureStatus::Unknown)
+                && terms.iter().all(|term| term_fits(term, &captures[i]))
+        })
+        .collect();
     if sort.column == Column::Id {
         // The list's own order: IDs only grow along it.
         if sort.descending {
@@ -380,15 +385,20 @@ pub(super) fn parse_sort(args: &[&str]) -> Result<Sort, String> {
 impl App {
     /// The captures the list shows: indexes into `captures`, in the order of its rows.
     pub fn visible_captures(&self) -> Vec<usize> {
-        visible(&self.captures, &self.list_view.filter, self.list_view.sort)
+        visible(
+            &self.captures,
+            &self.list_view.filter,
+            self.list_view.sort,
+            self.storage.config.show_unknown_signals,
+        )
     }
 
     /// The selection is a capture the list shows: after the filter changed, and once per pass of
     /// the main loop (a capture can stop fitting the filter: a key search names its protocol, `i`
     /// sets its make), it moves from a hidden capture to the nearest shown one.
     pub fn keep_selection_shown(&mut self) {
-        // Without a filter every capture is shown.
-        if self.list_view.filter.is_empty() {
+        // Without a text filter and with unknowns listed, every capture is shown.
+        if self.list_view.filter.is_empty() && self.storage.config.show_unknown_signals {
             return;
         }
         let view = self.visible_captures();
@@ -398,7 +408,9 @@ impl App {
     /// Select the capture at `at` when the list shows it; under a filter that hides it the
     /// selection stays where it is.
     pub(super) fn select_if_shown(&mut self, at: usize) {
-        if self.list_view.filter.is_empty() || self.visible_captures().contains(&at) {
+        if (self.list_view.filter.is_empty() && self.storage.config.show_unknown_signals)
+            || self.visible_captures().contains(&at)
+        {
             self.selected_capture = Some(at);
         }
     }
@@ -406,12 +418,42 @@ impl App {
     /// Select a capture the user just added (a loaded file, `:new`). A filter that hides it goes:
     /// the list shows what the action gave. True when it did.
     pub(super) fn select_added(&mut self, at: usize) -> bool {
-        let hidden = !self.list_view.filter.is_empty() && !self.visible_captures().contains(&at);
+        let hidden = !self.visible_captures().contains(&at);
         if hidden {
             self.list_view.filter.clear();
+            // An Unknown capture added while unknowns are hidden: show them again so the new one
+            // is visible (and keep that choice in config.ini).
+            if !self.storage.config.show_unknown_signals {
+                self.storage.config.show_unknown_signals = true;
+                let _ = self.storage.save_config();
+            }
         }
         self.selected_capture = Some(at);
         hidden
+    }
+
+    /// `U` / `:unknown`: show or hide Unknown captures in the list, matching
+    /// `show_unknown_signals` in config.ini (also used when receiving and importing).
+    pub fn toggle_show_unknown(&mut self) {
+        self.set_show_unknown(!self.storage.config.show_unknown_signals);
+    }
+
+    /// Set `show_unknown_signals`, persist it, and keep the selection on a shown capture.
+    pub fn set_show_unknown(&mut self, show: bool) {
+        self.storage.config.show_unknown_signals = show;
+        match self.storage.save_config() {
+            Ok(()) => {
+                self.status_message = Some(if show {
+                    "Unknown signals shown (U hides · saved in config.ini)".to_string()
+                } else {
+                    "Unknown signals hidden (U shows · saved in config.ini)".to_string()
+                });
+            }
+            Err(e) => {
+                self.last_error = Some(format!("Unknown filter set, but config.ini could not be saved: {e}"));
+            }
+        }
+        self.keep_selection_shown();
     }
 
     /// The row of the list the selection is on.
@@ -590,7 +632,7 @@ mod tests {
     }
 
     fn ids(captures: &[Capture], filter: &str, sort: Sort) -> Vec<u32> {
-        visible(captures, filter, sort).into_iter().map(|i| captures[i].id).collect()
+        visible(captures, filter, sort, true).into_iter().map(|i| captures[i].id).collect()
     }
 
     fn by(column: Column, descending: bool) -> Sort {
@@ -600,9 +642,18 @@ mod tests {
     #[test]
     fn no_filter_and_no_sort_is_the_list() {
         let list = list();
-        assert_eq!(visible(&list, "", Sort::default()), vec![0, 1, 2, 3, 4, 5]);
-        assert_eq!(visible(&list, "   ", Sort::default()), vec![0, 1, 2, 3, 4, 5]);
-        assert_eq!(visible(&[], "acme", Sort::default()), Vec::<usize>::new());
+        assert_eq!(visible(&list, "", Sort::default(), true), vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(visible(&list, "   ", Sort::default(), true), vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(visible(&[], "acme", Sort::default(), true), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn unknown_captures_can_be_hidden() {
+        let list = list();
+        // Capture #4 is Unknown (index 3).
+        assert_eq!(visible(&list, "", Sort::default(), false), vec![0, 1, 2, 4, 5]);
+        assert_eq!(ids(&list, "unknown", Sort::default()), [4]);
+        assert!(visible(&list, "unknown", Sort::default(), false).is_empty());
     }
 
     #[test]

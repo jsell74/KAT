@@ -53,6 +53,9 @@ use super::preset;
 use super::recorder::{RecordingStatus, RecordingSummary};
 use super::tx::TxSettings;
 
+/// Where the Sub-GHz app lists saved signals (Push export lands here).
+pub const SUBGHZ_DIR: &str = "/ext/subghz";
+
 // ---- the port ------------------------------------------------------------------------------------
 
 /// Every Flipper's USB console, with its USB serial when the system gives it: `configured` (config
@@ -162,6 +165,8 @@ enum Request {
     Receive { frequency: u32, done: Sender<Result<()>> },
     Stop { done: Sender<()> },
     Transmit { file: String, air_us: u64, done: Sender<Result<()>> },
+    /// Write a saved `.sub` (or other file) onto the SD card; receiving pauses like transmit.
+    WriteFile { path: String, data: Vec<u8>, done: Sender<Result<()>> },
 }
 
 /// What the worker needs besides the port.
@@ -261,6 +266,36 @@ fn run_worker(mut console: Console, requests: Receiver<Request>, setup: WorkerSe
                     Err(anyhow!("the Flipper's console is closed"))
                 } else {
                     console.transmit(&file, air_us)
+                };
+                if let Some(f) = resume {
+                    if !console.broken {
+                        match setup.receive(&mut console, f) {
+                            Ok(r) => rx = Some(r),
+                            Err(e) => setup.fail(&e),
+                        }
+                    } else {
+                        setup.receiving.store(false, Ordering::SeqCst);
+                    }
+                }
+                if console.broken {
+                    setup.connected.store(false, Ordering::SeqCst);
+                }
+                let _ = done.send(result);
+                if console.broken {
+                    break;
+                }
+            }
+            Request::WriteFile { path, data, done } => {
+                let resume = rx.take().map(|r| {
+                    let f = r.frequency;
+                    let _ = r.stop(&mut console);
+                    f
+                });
+                let result = if console.broken {
+                    Err(anyhow!("the Flipper's console is closed"))
+                } else {
+                    let _ = console.command(&format!("storage mkdir {SUBGHZ_DIR}"), Duration::from_secs(5));
+                    console.write_file(&path, &data)
                 };
                 if let Some(f) = resume {
                     if !console.broken {
@@ -519,6 +554,23 @@ impl FlipperController {
         );
         let timeout = Duration::from_micros(air_us) + Duration::from_secs(60);
         self.ask(|done| Request::Transmit { file, air_us, done }, timeout)?
+    }
+
+    /// Write `data` to `path` on the Flipper's SD card (USB console `storage write_chunk`).
+    /// Used to push a SubGhz `.sub` into `/ext/subghz` so the Sub-GHz app can open it.
+    pub fn write_sd_file(&mut self, path: &str, data: &[u8]) -> Result<()> {
+        self.connect()?;
+        tracing::info!("Writing {} bytes to {path} on the Flipper", data.len());
+        // Chunks + mkdir + remove: a few seconds is enough for typical key files.
+        let timeout = Duration::from_secs(30) + Duration::from_millis(data.len() as u64 / 10);
+        self.ask(
+            |done| Request::WriteFile {
+                path: path.to_string(),
+                data: data.to_vec(),
+                done,
+            },
+            timeout,
+        )?
     }
 
     pub fn iq_format(&self) -> IqFormat {

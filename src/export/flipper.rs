@@ -113,8 +113,8 @@ pub fn export_flipper_key(capture: &Capture, registry: &ProtocolRegistry, path: 
     Ok(())
 }
 
-/// Export a capture to Flipper Zero .sub RAW format
-pub fn export_flipper_sub(capture: &Capture, path: &Path) -> Result<()> {
+/// The text of a Flipper Zero RAW `.sub` for `capture` (same as [export_flipper_sub] writes).
+pub fn flipper_sub_text(capture: &Capture) -> Result<String> {
     if capture.raw_pairs.is_empty() {
         return Err(anyhow::anyhow!("No raw signal data to export"));
     }
@@ -156,7 +156,12 @@ pub fn export_flipper_sub(capture: &Capture, path: &Path) -> Result<()> {
         lines.push(format!("RAW_Data: {}", values.join(" ")));
     }
 
-    let content = lines.join("\n") + "\n";
+    Ok(lines.join("\n") + "\n")
+}
+
+/// Export a capture to Flipper Zero .sub RAW format
+pub fn export_flipper_sub(capture: &Capture, path: &Path) -> Result<()> {
+    let content = flipper_sub_text(capture)?;
     std::fs::write(path, content)?;
     tracing::info!("Exported Flipper .sub to {:?}", path);
     Ok(())
