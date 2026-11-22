@@ -57,6 +57,9 @@ pub(super) fn export_file(dir: &Path, typed: &str, ext: &str) -> PathBuf {
 /// Whether two decoded captures are the same signal (protocol, data, serial, button, counter).
 /// Unknown signals (no protocol) are never duplicates, so they can be kept for research.
 ///
+/// Used when **receiving / importing** so each distinct press (different counter) is kept —
+/// KeeLoq / HiTag2 key recovery needs several hop codes of the same remote.
+///
 /// `data` is the first 64 bits of a frame: in a longer one (Honda V5's 135 bits, Ford V1,
 /// Continental) they hold the fixed part only, so every later press of a button looked like the
 /// first and was left out. The counter tells the presses apart. The rest of the frame
@@ -69,6 +72,16 @@ pub(super) fn same_decoded_signal(a: &Capture, b: &Capture) -> bool {
         && a.serial == b.serial
         && a.button == b.button
         && a.counter == b.counter
+}
+
+/// Whether two captures are the same remote for the **list** clean filter (`U` / `ignore_duplicates`
+/// display): same non-empty serial. Captures without a serial are never list-duplicates this way.
+/// Receive/import still uses [same_decoded_signal] so multiple presses of one serial stay in memory.
+pub(super) fn same_remote_by_serial(a: &Capture, b: &Capture) -> bool {
+    match (a.serial, b.serial) {
+        (Some(sa), Some(sb)) => sa == sb,
+        _ => false,
+    }
 }
 
 /// Whether the list already has this signal ([same_decoded_signal]).

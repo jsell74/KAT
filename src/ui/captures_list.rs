@@ -267,11 +267,11 @@ fn list_title(
         if narrowed {
             parts.push(format!("{shown} of {count}"));
             if !show_unknown && hide_duplicates {
-                parts.push("unknown+duplicates hidden".to_string());
+                parts.push("unknown+duplicates by serial hidden".to_string());
             } else if !show_unknown {
                 parts.push("unknown hidden".to_string());
             } else if hide_duplicates && shown < count {
-                parts.push("duplicates hidden".to_string());
+                parts.push("duplicates by serial hidden".to_string());
             }
             if !filter.is_empty() {
                 if let Some(room) = filter_room {
@@ -949,7 +949,7 @@ mod tests {
         );
         assert_eq!(
             list_title(12, 15, "", arrival, false, true, 80),
-            " Captures · 12 of 15 · unknown+duplicates hidden "
+            " Captures · 12 of 15 · unknown+duplicates by serial hidden "
         );
         // A long filter is cut to the box, between its corners.
         let long = "protocol:acme serial:0a1b2c3 !status:unknown btn:unlock";
