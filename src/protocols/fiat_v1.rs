@@ -937,7 +937,9 @@ impl ProtocolDecoder for FiatV1Decoder {
         key.push_u32("XOR", raw[12].into());
         key.push_u32("Tail Bits", f.tail.into());
         key.push_hex_bytes("Raw", &raw);
-        if let Some((hitag2_key, epoch)) = Self::file_key(&f) {
+        // Every key KAT can TX with (embedded, hitag2_keys, ARF L2/L4): Flipper needs Hitag2 Key
+        // on the .sub, not only the rolling Key/Raw frame.
+        if let Some((hitag2_key, epoch)) = Self::resolve_key(&f) {
             // doctor-firmware's `fiat_v1_hitag2_key_cipher_to_disk`: the standard order.
             key.push_hex_bytes("Hitag2 Key", &KeyOrder::FiatBcm.standard(hitag2_key));
             key.push_u32("Hitag2 Epoch", epoch);
