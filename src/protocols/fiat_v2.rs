@@ -142,7 +142,9 @@
 //! three references: Bit 112 and a Raw line passing `fiat_v2_frame_valid` are required (no Raw =
 //! no key, as in the C), and the decode is the Raw frame's. Flipper-ARF's / doctor-firmware's
 //! files (Raw first, ARF's optional Hitag2 lines) load the same way; KAT keeps no key from them
-//! (its encoder re-discovers ARF's known keys from the frame itself).
+//! on load (its encoder re-discovers ARF's known keys from the frame itself). On write, when a
+//! known or saved key verifies the hop, KAT adds `Hitag2 Key` / `Hitag2 Epoch` so Flipper Push /
+//! Export Flipper key carry the crypto key with the signal.
 
 use std::collections::VecDeque;
 
@@ -690,6 +692,12 @@ impl ProtocolDecoder for FiatV2Decoder {
         key.push_u32("Cnt", Self::counter(&raw).into());
         key.push_u32("Hop", hop);
         key.push_hex_bytes("Raw", &raw);
+        // Crypto key when KAT has one (ARF known or hitag2_keys): Flipper-ARF's optional Hitag2
+        // lines, so Push / Export Flipper key carry the key with the signal.
+        if let Some(hitag2_key) = Self::find_key(&raw).map(|(k, _)| k) {
+            key.push_hex_bytes("Hitag2 Key", &KeyOrder::FiatBcm.standard(hitag2_key));
+            key.push_u32("Hitag2 Epoch", 0);
+        }
         Some(key)
     }
 }
