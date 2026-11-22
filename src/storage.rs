@@ -49,6 +49,9 @@ pub struct Config {
     /// Brute-force the key of every capture a search can recover (undecrypted PSA frames) without
     /// being asked, in the background (`autobf`).
     pub autobf: bool,
+    /// KeeLoq / HiTag2 key recovery on the GPU when a card is usable (`true`, default), or always
+    /// on the CPU (`false`). Config key `key_search_device = gpu|cpu`.
+    pub key_search_gpu: bool,
 
     // [radio]
     /// Default frequency in Hz
@@ -102,6 +105,7 @@ impl Config {
             show_unknown_signals: true, // researchers need to see them
             ignore_duplicates: true,
             autobf: true,
+            key_search_gpu: true,
             default_frequency: 433_920_000,
             hop_frequencies: crate::radio::hopper::DEFAULT_HOP_FREQUENCIES.to_vec(),
             hop_dwell_ms: crate::radio::hopper::DEFAULT_DWELL_MS,
@@ -159,6 +163,18 @@ impl Config {
         let show_unknown_signals = r.bool("general", "show_unknown_signals", legacy_unknown);
         let ignore_duplicates = r.bool("general", "ignore_duplicates", defaults.ignore_duplicates);
         let autobf = r.bool("general", "autobf", defaults.autobf);
+        let key_search_gpu = match r.text("general", "key_search_device").as_deref() {
+            None => defaults.key_search_gpu,
+            Some(v) if matches!(v.to_ascii_lowercase().as_str(), "gpu" | "auto" | "on" | "true" | "yes" | "1") => true,
+            Some(v) if matches!(v.to_ascii_lowercase().as_str(), "cpu" | "off" | "false" | "no" | "0") => false,
+            Some(v) => {
+                r.warn(format!(
+                    "key_search_device = {v} is not gpu or cpu; using {}",
+                    if defaults.key_search_gpu { "gpu" } else { "cpu" }
+                ));
+                defaults.key_search_gpu
+            }
+        };
 
         let default_frequency = r.frequency("radio", "default_frequency", defaults.default_frequency);
         let hop_frequencies = r.hop_list("radio", "hop_frequencies", defaults.hop_frequencies);
@@ -201,6 +217,7 @@ impl Config {
             show_unknown_signals,
             ignore_duplicates,
             autobf,
+            key_search_gpu,
             default_frequency,
             hop_frequencies,
             hop_dwell_ms,
@@ -265,6 +282,10 @@ ignore_duplicates = {ignore_duplicates}
 ; KeeLoq magic-serial (needs two hop codes) and HiTag2 Hell (needs a second press) run in the
 ; background. false: only the signal menu's "Recover key" starts them.
 autobf = {autobf}
+
+; KeeLoq / HiTag2 key recovery: gpu (default — use the graphics card when usable) or cpu
+; (always the processor). :keydevice gpu|cpu changes it at runtime. PSA TEA stays on the CPU.
+key_search_device = {key_search_device}
 
 [radio]
 ; Default receive frequency, in Hz or MHz ({freq_mhz:.2} MHz), 300-928 MHz.
@@ -336,6 +357,7 @@ session_autosave = {session_autosave}
             show_unknown_signals = self.show_unknown_signals,
             ignore_duplicates = self.ignore_duplicates,
             autobf = self.autobf,
+            key_search_device = if self.key_search_gpu { "gpu" } else { "cpu" },
             freq_mhz = freq_mhz,
             frequency = self.default_frequency,
             hop_list = self
@@ -511,6 +533,7 @@ const KNOWN_KEYS: &[(&str, &[&str])] = &[
             "research_mode",
             "ignore_duplicates",
             "autobf",
+            "key_search_device",
             "session_autosave",
         ],
     ),
@@ -1069,6 +1092,20 @@ mod config_warning_tests {
         assert!(cfg.autobf && warnings.is_empty(), "{warnings:?}");
         let (cfg, warnings) = parse("[general]\nautobf = false\n");
         assert!(!cfg.autobf && warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// `key_search_device` selects GPU (default) or CPU for KeeLoq / HiTag2 recovery.
+    #[test]
+    fn key_search_device_gpu_or_cpu() {
+        let (cfg, warnings) = parse("[general]\nmax_captures = 100\n");
+        assert!(cfg.key_search_gpu && warnings.is_empty(), "{warnings:?}");
+        let (cfg, warnings) = parse("[general]\nkey_search_device = cpu\n");
+        assert!(!cfg.key_search_gpu && warnings.is_empty(), "{warnings:?}");
+        let (cfg, warnings) = parse("[general]\nkey_search_device = GPU\n");
+        assert!(cfg.key_search_gpu && warnings.is_empty(), "{warnings:?}");
+        let (cfg, warnings) = parse("[general]\nkey_search_device = neon\n");
+        assert!(cfg.key_search_gpu, "bad value keeps default");
+        assert!(warnings.iter().any(|w| w.contains("key_search_device")), "{warnings:?}");
     }
 
     /// Switches take true/false, yes/no, on/off and 1/0 in any case; anything else keeps the
