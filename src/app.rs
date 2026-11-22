@@ -271,6 +271,11 @@ pub enum SignalAction {
     /// any capture, and a decoded one's timing against its protocol definition (ProtoPirate's
     /// Timing Tuner).
     Analyze,
+    /// Decoded capture: show the crypto key (or Key/Data) used for this signal.
+    ShowKey,
+    /// Remove the saved crypto key for this remote (HiTag2 UID / KeeLoq `BF_<serial>`), not the capture.
+    DeleteKey,
+    /// Remove the capture from the list.
     Delete,
     /// PSA TEA frame: run ProtoPirate's key brute force on a background thread.
     RecoverKey,
@@ -312,7 +317,9 @@ impl SignalAction {
             SignalAction::ExportFlipperKey => "Export Flipper key (.sub)",
             SignalAction::PushToFlipper => "Push to Flipper (/ext/subghz)",
             SignalAction::Analyze => "Analyze",
-            SignalAction::Delete => "Delete Signal",
+            SignalAction::ShowKey => "Show key",
+            SignalAction::DeleteKey => "Delete key",
+            SignalAction::Delete => "Delete signal",
             SignalAction::RecoverKey => "Recover key (PSA brute force)",
             SignalAction::RecoverKeeloqKey => "Recover key (KeeLoq magic serial)",
             SignalAction::RecoverHitag2Key => "Recover key (HiTag2)",
@@ -1356,6 +1363,8 @@ impl App {
         if let Some(action) = self.key_recovery_action() {
             actions.insert(0, action);
         }
+        // Decoded: Show key / Delete key next to Delete signal.
+        self.insert_key_menu_actions(&mut actions);
         actions
     }
 
@@ -1526,6 +1535,12 @@ impl App {
             }
             SignalAction::Analyze => {
                 self.open_analysis(capture_id);
+            }
+            SignalAction::ShowKey => {
+                self.show_capture_key(capture_id);
+            }
+            SignalAction::DeleteKey => {
+                self.delete_capture_key(capture_id);
             }
             SignalAction::Delete => {
                 let id_str = capture_id.to_string();

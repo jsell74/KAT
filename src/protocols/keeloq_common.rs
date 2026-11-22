@@ -377,12 +377,16 @@ pub fn add_keeloq_key(entry: MfKey) -> bool {
 #[cfg(test)]
 pub static KEYSTORE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Test helper: take the session keys named `names` out again (see [`add_keeloq_key`]).
-#[cfg(test)]
-pub fn remove_keeloq_keys(names: &[&str]) {
+/// Take keys named `names` out of the in-memory keystore (session / user overlays). Embedded
+/// blob entries with those names are also filtered out for this process (rare; used by tests and
+/// by "Delete key" for recovered `BF_<serial>` names).
+pub fn remove_keeloq_keys(names: &[&str]) -> usize {
     let mut keys = keystore_cell().write().unwrap_or_else(|e| e.into_inner());
+    let before = keys.len();
     let next: Vec<MfKey> = keys.iter().filter(|e| !names.contains(&e.name.as_str())).cloned().collect();
+    let removed = before - next.len();
     *keys = Vec::leak(next);
+    removed
 }
 
 /// C "mirrored man": the manufacturer key with its byte order reversed (tried for
