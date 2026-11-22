@@ -113,8 +113,8 @@ pub(super) fn fit_encoder_status(registry: &ProtocolRegistry, capture: &mut Capt
     }
 }
 
-/// Whether the signal menu offers "Show key": protocol known (Decoded / Encode).
-pub(super) fn show_key_offered(capture: &Capture) -> bool {
+/// Whether the capture is decoded enough that a crypto-key action could apply.
+pub(super) fn show_key_decoded(capture: &Capture) -> bool {
     matches!(
         capture.status,
         CaptureStatus::Decoded | CaptureStatus::EncoderCapable
@@ -154,26 +154,9 @@ fn keeloq_key_line(capture: &Capture) -> Option<String> {
     Some(format!("KeeLoq manufacturer key ({mf}): {:016X}", e.key))
 }
 
-/// Flipper `Key:` bytes as spaced hex, when the protocol writes a key file.
-fn flipper_key_line(capture: &Capture, protocols: &ProtocolRegistry) -> Option<String> {
-    let key = flipper::capture_flipper_key(capture, protocols)?;
-    let hex = if key.key_bytes.is_empty() {
-        format!("{:016X}", key.key)
-    } else {
-        key.key_bytes.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ")
-    };
-    let mut line = format!("Flipper Key: {hex}");
-    if let Some((_, v)) = key.fields.iter().find(|(n, _)| n.eq_ignore_ascii_case("Hitag2 Key")) {
-        line.push_str(&format!(" · Hitag2 Key: {v}"));
-    }
-    if let Some((_, v)) = key.fields.iter().find(|(n, _)| n.eq_ignore_ascii_case("Manufacture")) {
-        line.push_str(&format!(" · Manufacture: {v}"));
-    }
-    Some(line)
-}
-
-/// Status-line text for "Show key" (crypto key when known, else frame Key/Data).
-pub(super) fn capture_key_status_text(capture: &Capture, protocols: &ProtocolRegistry) -> String {
+/// Status-line text for "Show key": **crypto** keys only (KeeLoq manufacturer / `BF_`, HiTag2).
+/// Never the Flipper `Key:` / Key/Data frame (that is the rolling code and changes every press).
+pub(super) fn capture_crypto_key_status_text(capture: &Capture) -> Option<String> {
     let mut parts = Vec::new();
     if let Some(line) = keeloq_key_line(capture) {
         parts.push(line);
@@ -184,24 +167,7 @@ pub(super) fn capture_key_status_text(capture: &Capture, protocols: &ProtocolReg
             parts.push(format!("Fiat order: {}", hitag2_keys::hex(&fiat, "")));
         }
     }
-    if let Some(line) = flipper_key_line(capture, protocols) {
-        parts.push(line);
-    }
-    if parts.is_empty() {
-        if capture.data_count_bit > 0 {
-            format!(
-                "#{:02} {}: Key/Data 0x{} ({} bits)",
-                capture.id,
-                capture.protocol_name(),
-                capture.data_hex(),
-                capture.data_count_bit
-            )
-        } else {
-            format!("#{:02} {}: no key stored on this capture", capture.id, capture.protocol_name())
-        }
-    } else {
-        format!("#{:02} {}: {}", capture.id, capture.protocol_name(), parts.join(" · "))
-    }
+    (!parts.is_empty()).then(|| format!("#{:02} {}: {}", capture.id, capture.protocol_name(), parts.join(" · ")))
 }
 
 impl App {
@@ -210,7 +176,16 @@ impl App {
         flipper::capture_flipper_key(capture, &self.protocols).is_some()
     }
 
-    /// Insert "Show key" / "Delete key" just before "Delete signal" when the capture is decoded.
+    /// True when KAT already knows this remote's **crypto** key (HiTag2 / KeeLoq manufacturer or
+    /// `BF_`). Flipper `Key:` / Key/Data alone does not count — that is the rolling frame.
+    pub(super) fn crypto_key_known(&self, c: &Capture) -> bool {
+        if !show_key_decoded(c) {
+            return false;
+        }
+        keeloq_key_line(c).is_some() || self.hitag2_shown_key(c).is_some()
+    }
+
+    /// Insert "Show key" / "Delete key" just before "Delete signal" when a crypto key is known.
     pub(super) fn insert_key_menu_actions(&self, actions: &mut Vec<SignalAction>) {
         let Some(c) = self.signal_menu_capture() else { return };
         let at = actions
@@ -218,7 +193,7 @@ impl App {
             .position(|a| matches!(a, SignalAction::Delete))
             .unwrap_or(actions.len());
         let mut insert_at = at;
-        if show_key_offered(c) && !actions.iter().any(|a| matches!(a, SignalAction::ShowKey)) {
+        if self.crypto_key_known(c) && !actions.iter().any(|a| matches!(a, SignalAction::ShowKey)) {
             actions.insert(insert_at, SignalAction::ShowKey);
             insert_at += 1;
         }
@@ -227,8 +202,8 @@ impl App {
         }
     }
 
-    /// "Show key": Hitag2 opens the key overlay when known; otherwise the status line carries the
-    /// manufacturer / Flipper / Key/Data hex.
+    /// "Show key": the remote's crypto key (HiTag2 overlay, or KeeLoq manufacturer / `BF_` on the
+    /// status line). Never the Flipper rolling-code `Key:` bytes.
     pub fn show_capture_key(&mut self, id: u32) {
         let Some(capture) = self.captures.iter().find(|c| c.id == id).cloned() else {
             self.last_error = Some(format!("Capture #{id:02} not found"));
@@ -255,7 +230,29 @@ impl App {
             ));
             return;
         }
-        self.status_message = Some(capture_key_status_text(&capture, &self.protocols));
+        if let Some(text) = capture_crypto_key_status_text(&capture) {
+            self.status_message = Some(text);
+            return;
+        }
+        // Still searching, or no crypto key yet — do not show the rolling frame as a "key".
+        if self.key_search_runs_for(capture.id)
+            || self.hitag2_bf_job.as_ref().is_some_and(|j| {
+                hitag2_bf::frame_of(&capture).is_ok_and(|f| f.uid == j.uid)
+            })
+            || self.keeloq_bf_job.as_ref().is_some_and(|j| capture.serial == Some(j.serial))
+        {
+            self.status_message = Some(format!(
+                "#{:02} {}: crypto key not ready yet — recovery still running",
+                capture.id,
+                capture.protocol_name()
+            ));
+        } else {
+            self.status_message = Some(format!(
+                "#{:02} {}: no crypto key yet (use Recover key; Flipper Key/Data is the rolling code, not the crypto key)",
+                capture.id,
+                capture.protocol_name()
+            ));
+        }
     }
 
     /// "Delete key": drop the saved HiTag2 / KeeLoq `BF_<serial>` key for this remote (not the
@@ -473,15 +470,16 @@ mod tests {
     use crate::capture::StoredLevelDuration;
 
     #[test]
-    fn show_key_is_for_decoded_captures_only() {
+    fn show_key_decoded_is_for_decoded_captures_only() {
         let mut c = Capture::from_pairs(1, 433_920_000, Vec::new());
-        assert!(!show_key_offered(&c));
+        assert!(!show_key_decoded(&c));
         c.protocol = Some("Acme".into());
         c.status = CaptureStatus::Decoded;
-        assert!(show_key_offered(&c));
+        assert!(show_key_decoded(&c));
         c.status = CaptureStatus::EncoderCapable;
-        assert!(show_key_offered(&c));
+        assert!(show_key_decoded(&c));
         assert!(!delete_key_offered(&c), "no saved HiTag2/BF key");
+        assert!(capture_crypto_key_status_text(&c).is_none(), "no crypto key without keystore hit");
     }
 
     #[test]
