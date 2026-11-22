@@ -14,8 +14,9 @@
 //!   `<name>_key.sub` (so it does not take the RAW export's name) with the protocol's
 //!   `to_flipper_key` (its reference's `serialize`), never over an existing file.
 //! - **Push to Flipper**: [`App::push_to_flipper`] writes the key file (or RAW `.sub`) onto the
-//!   Flipper's SD card at `/ext/subghz/…` over the USB console. Bluetooth file transfer is not
-//!   supported on macOS (no CDC serial over BLE); USB is the path KAT already uses.
+//!   Flipper's SD card at `/ext/subghz/…` over the USB console. [`App::push_all_visible_to_flipper`]
+//!   (`:pushflipper`) does the same for every capture the list shows. Bluetooth file transfer is
+//!   not supported on macOS (no CDC serial over BLE); USB is the path KAT already uses.
 
 use anyhow::Result;
 
@@ -26,6 +27,33 @@ use crate::export::flipper;
 use crate::protocols::ProtocolRegistry;
 use crate::radio::devices::RadioKind;
 use crate::radio::SUBGHZ_DIR;
+
+/// Bytes and SD path for a capture pushed to `/ext/subghz` (key file preferred, else RAW).
+fn flipper_push_payload(
+    capture: &Capture,
+    protocols: &ProtocolRegistry,
+) -> Result<(Vec<u8>, String, &'static str), String> {
+    let (bytes, kind) = match flipper::capture_flipper_key(capture, protocols) {
+        Some(key) => (key.to_text().into_bytes(), "key"),
+        None if capture.has_raw_data() => flipper::flipper_sub_text(capture)
+            .map(|text| (text.into_bytes(), "RAW"))
+            .map_err(|e| format!("Could not build .sub: {e:#}"))?,
+        None => {
+            return Err(format!(
+                "{} has no Flipper key file and no raw pairs to push",
+                capture.protocol_name()
+            ));
+        }
+    };
+    let stem = if kind == "key" {
+        format!("{}_key", App::default_export_filename(capture))
+    } else {
+        App::default_export_filename(capture)
+    };
+    // Capture ID keeps each push unique when several remotes share the same name.
+    let name = format!("{}_{:02}.sub", safe_stem(&stem), capture.id);
+    Ok((bytes, format!("{SUBGHZ_DIR}/{name}"), kind))
+}
 
 /// The signal menu for a capture: without raw pairs no Replay, no RAW `.sub` export and no timing
 /// analysis (they need the pairs); "Export Flipper key" right after the RAW export's place (or
@@ -108,51 +136,98 @@ impl App {
         }
     }
 
+    fn no_flipper_for_push_msg() -> String {
+        "No Flipper Zero on USB (close qFlipper, plug it in, then :radios). \
+         Bluetooth push is not supported on macOS."
+            .to_string()
+    }
+
+    /// Write prepared `.sub` bytes to `path` on the Flipper SD card.
+    fn write_push_to_flipper(&mut self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        let Some(flipper) = self.flipper_for_push() else {
+            return Err(Self::no_flipper_for_push_msg());
+        };
+        flipper.write_sd_file(path, bytes).map_err(|e| format!("Push to Flipper failed: {e:#}"))
+    }
+
     /// Push the capture's Flipper key file (preferred) or RAW `.sub` onto the Flipper's SD card
-    /// at `/ext/subghz/<name>.sub` over USB. Bluetooth is not used (see module docs).
+    /// at `/ext/subghz/<name>_<id>.sub` over USB. Bluetooth is not used (see module docs).
     pub fn push_to_flipper(&mut self, id: u32) {
         let Some(capture) = self.captures.iter().find(|c| c.id == id).cloned() else {
             self.last_error = Some(format!("Capture #{id:02} not found"));
             return;
         };
-        let (bytes, kind) = match flipper::capture_flipper_key(&capture, &self.protocols) {
-            Some(key) => (key.to_text().into_bytes(), "key"),
-            None if capture.has_raw_data() => match flipper::flipper_sub_text(&capture) {
-                Ok(text) => (text.into_bytes(), "RAW"),
-                Err(e) => {
-                    self.last_error = Some(format!("Could not build .sub: {e:#}"));
-                    return;
-                }
-            },
-            None => {
-                self.last_error = Some(format!(
-                    "{} has no Flipper key file and no raw pairs to push",
-                    capture.protocol_name()
-                ));
+        let (bytes, path, kind) = match flipper_push_payload(&capture, &self.protocols) {
+            Ok(v) => v,
+            Err(e) => {
+                self.last_error = Some(e);
                 return;
             }
         };
-        let stem = if kind == "key" {
-            format!("{}_key", Self::default_export_filename(&capture))
-        } else {
-            Self::default_export_filename(&capture)
-        };
-        let name = format!("{}.sub", safe_stem(&stem));
-        let path = format!("{SUBGHZ_DIR}/{name}");
-        let Some(flipper) = self.flipper_for_push() else {
-            self.last_error = Some(
-                "No Flipper Zero on USB (close qFlipper, plug it in, then :radios). \
-                 Bluetooth push is not supported on macOS."
-                    .to_string(),
-            );
-            return;
-        };
-        match flipper.write_sd_file(&path, &bytes) {
+        match self.write_push_to_flipper(&path, &bytes) {
             Ok(()) => {
                 self.status_message = Some(format!("Pushed {kind} .sub to Flipper {path} (USB)"));
             }
-            Err(e) => {
-                self.last_error = Some(format!("Push to Flipper failed: {e:#}"));
+            Err(e) => self.last_error = Some(e),
+        }
+    }
+
+    /// `:pushflipper`: push every capture the list shows (filter + Unknown setting) to
+    /// `/ext/subghz` over USB. Skips ones with neither a key file nor raw pairs; status line
+    /// reports how many succeeded and which failed.
+    pub fn push_all_visible_to_flipper(&mut self) {
+        if self.flipper_for_push().is_none() {
+            self.last_error = Some(Self::no_flipper_for_push_msg());
+            return;
+        }
+        let view = self.visible_captures();
+        if view.is_empty() {
+            self.status_message = Some("No captures to push (the list is empty)".to_string());
+            return;
+        }
+        let jobs: Vec<(u32, Result<(Vec<u8>, String, &'static str), String>)> = view
+            .iter()
+            .filter_map(|&i| self.captures.get(i).map(|c| (c.id, flipper_push_payload(c, &self.protocols))))
+            .collect();
+        let skip = jobs.iter().filter(|(_, r)| r.is_err()).count();
+        let mut ok = 0usize;
+        let mut failed: Vec<String> = Vec::new();
+        let total = jobs.len();
+        for (n, (id, prepared)) in jobs.into_iter().enumerate() {
+            match prepared {
+                Err(_) => {
+                    // Already counted as skip: no key and no raw.
+                }
+                Ok((bytes, path, _)) => {
+                    self.status_message =
+                        Some(format!("Pushing to Flipper… {}/{} (#{id:02})", n + 1, total));
+                    match self.write_push_to_flipper(&path, &bytes) {
+                        Ok(()) => ok += 1,
+                        Err(e) => failed.push(format!("#{id:02}: {e}")),
+                    }
+                }
+            }
+        }
+        let skipped = skip;
+        if ok == 0 && failed.is_empty() {
+            self.last_error = Some(format!(
+                "Nothing to push: {skipped} visible capture(s) have no Flipper key/RAW"
+            ));
+            return;
+        }
+        let mut msg = format!("Pushed {ok} of {total} to Flipper (/ext/subghz)");
+        if skipped > 0 {
+            msg.push_str(&format!(" · {skipped} skipped (no key/RAW)"));
+        }
+        if failed.is_empty() {
+            self.status_message = Some(msg);
+        } else {
+            let ids: Vec<&str> = failed.iter().map(|s| s.split(':').next().unwrap_or(s.as_str())).collect();
+            msg.push_str(&format!(" · {} failed ({})", failed.len(), ids.join(", ")));
+            self.last_error = Some(msg);
+            // Keep the first failure detail in the log.
+            if let Some(first) = failed.first() {
+                tracing::warn!("Push all to Flipper: {first}");
             }
         }
     }
@@ -203,6 +278,22 @@ impl App {
 mod tests {
     use super::*;
     use crate::capture::StoredLevelDuration;
+
+    #[test]
+    fn push_payload_names_include_the_capture_id() {
+        let reg = ProtocolRegistry::new();
+        let text = "Filetype: Flipper SubGhz Key File\nVersion: 1\nFrequency: 433920000\n\
+                    Preset: FuriHalSubGhzPreset2FSKDev476Async\nProtocol: Kia V0\nBit: 61\n\
+                    Key: 0F 73 91 67 BD 75 B2 BD\n";
+        let key = crate::protocols::FlipperKey::parse(text).unwrap();
+        let c = flipper::capture_from_key(&key, &reg, 7).unwrap();
+        let (_, path, kind) = flipper_push_payload(&c, &reg).unwrap();
+        assert_eq!(kind, "key");
+        assert!(path.starts_with("/ext/subghz/"), "{path}");
+        assert!(path.ends_with("_07.sub"), "{path}");
+        let empty = Capture::from_pairs(3, 433_920_000, Vec::new());
+        assert!(flipper_push_payload(&empty, &reg).is_err());
+    }
 
     /// Captures without raw pairs lose Replay, the RAW export and Analyze; the key-file
     /// export sits after the RAW export (or the .fob export when the RAW one is gone).
