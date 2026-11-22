@@ -124,6 +124,8 @@ COMMANDS   (ID: 4  #4  1,3,5  1 3 5  1-5)
                        (:filter alone: all of them)
   :unknown [on|off]    Show or hide Unknown + duplicates
                        by serial (U; config.ini pair)
+  :keydevice gpu|cpu   KeeLoq/HiTag2 on GPU or CPU
+                       (key_search_device in config.ini)
   :pushflipper         Push every shown capture's .sub
                        to the Flipper (/ext/subghz, USB)
   :sort [column] [desc]
