@@ -304,10 +304,14 @@ impl ProtocolDecoder for Hitag2RkeDecoder {
         Some(signal(uid, btn, lctr, ks, chk))
     }
 
-    /// The decoder's `serialize`: the generic block plus `Ks`.
+    /// The decoder's `serialize`: the generic block plus `Ks`, and `Hitag2 Key` when recovered.
     fn to_flipper_key(&self, d: &DecodedSignal) -> Option<FlipperKey> {
         let mut key = FlipperKey::for_protocol(NAME, d.data_count_bit, d.data);
         key.push_u32("Ks", d.extra? as u32);
+        if let Some(hitag2_key) = Self::saved_key(d) {
+            key.push_hex_bytes("Hitag2 Key", &hitag2_key);
+            key.push_u32("Hitag2 Epoch", 0);
+        }
         Some(key)
     }
 }
