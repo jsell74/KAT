@@ -127,8 +127,8 @@ COMMANDS   (ID: 4  #4  1,3,5  1 3 5  1-5)
   :keydevice gpu|cpu   KeeLoq/HiTag2 on GPU or CPU
                        (key_search_device in config.ini)
   :save                Write radio prefs to config.ini
-  :pushflipper         Push every shown capture's .sub
-                       to the Flipper (/ext/subghz, USB)
+  :pushflipper         Push all shown to Flipper USB
+                       (/ext/subghz; same as TX menu)
   :sort [column] [desc]
                        Sort the list (:sort alone: by
                        ID, the order of arrival)
