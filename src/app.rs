@@ -265,7 +265,7 @@ pub enum SignalAction {
     ExportFlipper,
     /// Flipper key file via the protocol's `to_flipper_key` (only when it writes one).
     ExportFlipperKey,
-    /// Write the capture's `.sub` onto a Flipper Zero's SD card (`/ext/subghz`, USB console).
+    /// Push every visible capture onto a Flipper Zero's SD card (`/ext/subghz`, USB; same as `:pushflipper`).
     PushToFlipper,
     /// The signal report (app/analyze_view.rs): modulation, pulse widths, coding, rows and bits of
     /// any capture, and a decoded one's timing against its protocol definition (ProtoPirate's
@@ -320,7 +320,7 @@ impl SignalAction {
             SignalAction::ExportFob => "Export .fob",
             SignalAction::ExportFlipper => "Export .sub (Flipper)",
             SignalAction::ExportFlipperKey => "Export Flipper key (.sub)",
-            SignalAction::PushToFlipper => "Push to Flipper (/ext/subghz)",
+            SignalAction::PushToFlipper => "Push all to Flipper (/ext/subghz)",
             SignalAction::Analyze => "Analyze",
             SignalAction::ShowKey => "Show key",
             SignalAction::DeleteKey => "Delete key",
@@ -1681,7 +1681,8 @@ impl App {
                 self.export_flipper_key(capture_id)?;
             }
             SignalAction::PushToFlipper => {
-                self.push_to_flipper(capture_id);
+                // Same as `:pushflipper`: every visible capture (one key .sub per remote + RAW).
+                self.push_all_visible_to_flipper();
             }
             SignalAction::Analyze => {
                 self.open_analysis(capture_id);
