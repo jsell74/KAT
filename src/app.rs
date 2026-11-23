@@ -891,6 +891,8 @@ impl App {
             },
             // KeeLoq / HiTag2: GPU vs CPU (`key_search_device` in config.ini).
             "keydevice" | "keygpu" => self.cmd_key_search_device(&args),
+            // Runtime radio prefs → config.ini (freq per device, hop, gains, tx).
+            "save" | "wconfig" => self.cmd_save_config(),
             // Every capture the list shows → `/ext/subghz` on a Flipper over USB.
             "pushflipper" | "pushall" => self.push_all_visible_to_flipper(),
             "radios" => self.cmd_radios(),
@@ -1012,6 +1014,73 @@ impl App {
                     Some(format!("Key search device set, but config.ini could not be saved: {e}"));
             }
         }
+    }
+
+    /// `:save` / `:wconfig` — write the current radio prefs into `config.ini` (no autosave).
+    fn cmd_save_config(&mut self) {
+        self.apply_runtime_to_config();
+        match self.storage.save_config() {
+            Ok(()) => {
+                self.status_message = Some(format!(
+                    "Saved radio settings in {}",
+                    self.storage.config_dir().join("config.ini").display()
+                ));
+            }
+            Err(e) => {
+                self.last_error = Some(format!("Could not save config.ini: {e}"));
+            }
+        }
+    }
+
+    /// Copy runtime tuning / hop / TX into [`Storage::config`] before writing `config.ini`.
+    fn apply_runtime_to_config(&mut self) {
+        let hop = self
+            .selected()
+            .and_then(|r| r.hop.plan.clone())
+            .or_else(|| self.radios.iter().find_map(|r| r.hop.plan.clone()));
+        let tuning = self
+            .selected()
+            .map(|r| r.tuning.clone())
+            .unwrap_or(self.offline_tuning.clone());
+        let tx_vga_gain = self.tx_vga_gain;
+        let tx_amp = self.tx_amp;
+        let tx_radio = self.tx_radio.and_then(|i| {
+            let r = self.radios.get(i)?;
+            if !r.kind().can_transmit() {
+                return None;
+            }
+            Some(crate::storage::RadioPick {
+                kind: r.kind(),
+                serial: config_section_serial(&r.found),
+            })
+        });
+        // One `[radio.<kind>.<serial>]` per open radio so freqs/gains survive a restart.
+        let radio_sections: Vec<_> = self
+            .radios
+            .iter()
+            .map(|r| crate::storage::RadioSection {
+                kind: r.kind(),
+                serial: config_section_serial(&r.found),
+                frequency: Some(r.tuning.frequency),
+                lna_gain: Some(r.tuning.lna_gain),
+                vga_gain: Some(r.tuning.vga_gain),
+                amp: Some(r.tuning.amp),
+            })
+            .collect();
+
+        let cfg = &mut self.storage.config;
+        if let Some(plan) = hop {
+            cfg.hop_frequencies = plan.frequencies;
+            cfg.hop_dwell_ms = plan.dwell_ms;
+        }
+        cfg.default_frequency = tuning.frequency;
+        cfg.default_lna_gain = tuning.lna_gain;
+        cfg.default_vga_gain = tuning.vga_gain;
+        cfg.default_amp = tuning.amp;
+        cfg.tx_vga_gain = tx_vga_gain;
+        cfg.tx_amp = tx_amp;
+        cfg.tx_radio = tx_radio;
+        cfg.radio_sections = radio_sections;
     }
 
     /// Set the receive frequency
@@ -2222,6 +2291,18 @@ impl App {
         };
         self.next_capture_id += 1;
         self.captures.push(capture);
+    }
+}
+
+/// Serial string for `[radio.<kind>.<serial>]` / `tx_radio`: short suffix that still matches.
+fn config_section_serial(found: &crate::radio::devices::FoundRadio) -> Option<String> {
+    use crate::radio::devices::RadioKind;
+    let raw = found.serial.as_deref().map(str::trim).filter(|s| !s.is_empty())?;
+    let raw = raw.strip_prefix("flip_").unwrap_or(raw);
+    if found.kind == RadioKind::HackRf && raw.chars().count() > 8 {
+        Some(raw.chars().skip(raw.chars().count() - 8).collect())
+    } else {
+        Some(raw.to_string())
     }
 }
 
