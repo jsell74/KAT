@@ -13,10 +13,10 @@
 //! - **Export**: [`App::export_flipper_key`] / [`App::complete_flipper_key_export`] write
 //!   `<name>_key.sub` (so it does not take the RAW export's name) with the protocol's
 //!   `to_flipper_key` (its reference's `serialize`), never over an existing file.
-//! - **Push to Flipper**: [`App::push_to_flipper`] writes the key file (or RAW `.sub`) onto the
-//!   Flipper's SD card at `/ext/subghz/…` over the USB console. [`App::push_all_visible_to_flipper`]
-//!   (`:pushflipper`) does the same for every capture the list shows. Bluetooth file transfer is
-//!   not supported on macOS (no CDC serial over BLE); USB is the path KAT already uses.
+//! - **Push to Flipper**: the signal-menu action and `:pushflipper` both call
+//!   [`App::push_all_visible_to_flipper`]: every capture the list shows goes to `/ext/subghz/…`
+//!   over USB (one crypto key `.sub` per remote, further presses as RAW). Single-capture push is
+//!   [`App::push_to_flipper`]. Bluetooth file transfer is not used; USB is the path KAT already uses.
 
 use anyhow::Result;
 
@@ -79,8 +79,8 @@ fn flipper_push_payload(
 /// The signal menu for a capture: without raw pairs no Replay, no RAW `.sub` export and no timing
 /// analysis (they need the pairs); "Export Flipper key" right after the RAW export's place (or
 /// the `.fob` export's) when `key_file` (the protocol writes the capture as a key file).
-/// `push_flipper`: a Flipper Zero is plugged in, so "Push to Flipper" is offered when a key or
-/// RAW `.sub` can be written.
+/// `push_flipper`: a Flipper Zero is plugged in, so "Push all to Flipper" is offered (bulk push of
+/// every visible capture, same as `:pushflipper` — not only the selected frame).
 pub(super) fn fit_signal_actions(
     actions: &mut Vec<SignalAction>,
     has_raw: bool,
@@ -98,7 +98,7 @@ pub(super) fn fit_signal_actions(
             .map_or(actions.len(), |i| i + 1);
         actions.insert(at, SignalAction::ExportFlipperKey);
     }
-    if push_flipper && (key_file || has_raw) {
+    if push_flipper {
         // After the last Flipper export action (key file preferred over RAW).
         let at = actions
             .iter()
@@ -358,8 +358,9 @@ impl App {
         flipper.write_sd_file(path, bytes).map_err(|e| format!("Push to Flipper failed: {e:#}"))
     }
 
-    /// Push the capture's Flipper key file (preferred) or RAW `.sub` onto the Flipper's SD card
-    /// at `/ext/subghz/<name>_<id>.sub` over USB. Bluetooth is not used (see module docs).
+    /// Push one capture's Flipper key file (preferred) or RAW `.sub` onto the Flipper's SD card
+    /// at `/ext/subghz/<name>_<id>.sub` over USB. The TX menu and `:pushflipper` use the bulk path.
+    #[allow(dead_code)]
     pub fn push_to_flipper(&mut self, id: u32) {
         let Some(capture) = self.captures.iter().find(|c| c.id == id).cloned() else {
             self.last_error = Some(format!("Capture #{id:02} not found"));
@@ -568,6 +569,12 @@ mod tests {
                 Analyze, Delete
             ]
         );
+        // Bulk push is offered whenever a Flipper is present, even if this frame has no key/RAW.
+        let mut a = car.clone();
+        fit_signal_actions(&mut a, false, false, true);
+        assert!(a.contains(&PushToFlipper), "{a:?}");
+        assert!(!a.contains(&Replay));
+        assert!(!a.contains(&ExportFlipper));
     }
 
     /// The default export name never contains a path separator (makes such as "Kia/Hyundai").
