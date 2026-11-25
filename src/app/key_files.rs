@@ -16,16 +16,20 @@
 //! - **Push to Flipper**: the signal-menu action and `:pushflipper` both call
 //!   [`App::push_all_visible_to_flipper`]: every capture the list shows goes to `/ext/subghz/…`
 //!   over USB (one crypto key `.sub` per remote, further presses as RAW). Single-capture push is
-//!   [`App::push_to_flipper`]. Bluetooth file transfer is not used; USB is the path KAT already uses.
+//!   [`App::push_to_flipper`]. Before writing the Flipper files, Push also flushes any known
+//!   HiTag2 / KeeLoq `BF_<serial>` crypto key to the local config
+//!   (`hitag2_keys.txt` / `keeloq_mfcodes_user`) so a key only in session/UI is persisted.
+//!   Bluetooth file transfer is not used; USB is the path KAT already uses.
 
 use anyhow::Result;
+use std::path::Path;
 
 use super::{App, ExportFormat, InputMode, RadioDevice, SignalAction};
 use super::files::safe_stem;
 use super::hitag2_bf::{self, Hitag2KeyReport};
 use crate::capture::{Capture, CaptureStatus};
 use crate::export::flipper;
-use crate::protocols::hitag2_keys;
+use crate::protocols::hitag2_keys::{self, KeyOrder};
 use crate::protocols::keeloq_common::keeloq_keystore;
 use crate::protocols::ProtocolRegistry;
 use crate::radio::devices::RadioKind;
@@ -47,6 +51,47 @@ fn flipper_key_file_tag(capture: &Capture) -> String {
         Some(id) => safe_stem(&id.replace(':', "_")),
         None => format!("{:02}", capture.id),
     }
+}
+
+/// Bytes to store in `hitag2_keys.txt` for a UI/session [`hitag2_keys::ShownKey`].
+fn hitag2_file_key_bytes(shown: hitag2_keys::ShownKey) -> [u8; 6] {
+    match shown.order {
+        KeyOrder::FiatBcm => shown.fiat_order().unwrap_or(shown.standard),
+        KeyOrder::Standard => shown.standard,
+    }
+}
+
+/// Flush known crypto keys for `capture` to the local config dir (idempotent).
+/// HiTag2 → `hitag2_keys.txt`; KeeLoq recovered → `keeloq_mfcodes_user` as `BF_<serial>`.
+/// Returns a short note when something was written or failed; `None` when there was nothing to do.
+fn persist_crypto_keys_locally(capture: &Capture, config_dir: &Path) -> Option<String> {
+    let mut notes = Vec::new();
+
+    if let Ok(frame) = hitag2_bf::frame_of(capture) {
+        let to_save = hitag2_keys::shown_key(capture.protocol_name(), &capture.decoded_signal())
+            .map(|shown| (hitag2_file_key_bytes(shown), shown.epoch))
+            .or_else(|| {
+                hitag2_keys::find(frame.uid).and_then(|r| r.key.map(|key| (key, r.epoch)))
+            });
+        if let Some((key, epoch)) = to_save {
+            match hitag2_keys::save_key(config_dir, frame.uid, key, epoch) {
+                Ok(path) => notes.push(format!("HiTag2 key → {}", path.display())),
+                Err(e) => notes.push(format!("HiTag2 key not saved locally ({e})")),
+            }
+        }
+    }
+
+    if let Some(serial) = capture.serial {
+        let name = format!("BF_{serial:07X}");
+        if let Some(entry) = keeloq_keystore().iter().find(|e| e.name == name) {
+            match crate::keystore::append_user_key(config_dir, &name, entry.learning, entry.key) {
+                Ok(path) => notes.push(format!("{name} → {}", path.display())),
+                Err(e) => notes.push(format!("{name} not saved locally ({e})")),
+            }
+        }
+    }
+
+    (!notes.is_empty()).then(|| notes.join("; "))
 }
 
 /// Bytes and SD path for a capture pushed to `/ext/subghz` (key file preferred, else RAW).
@@ -375,13 +420,18 @@ impl App {
     }
 
     /// Push one capture's Flipper key file (preferred) or RAW `.sub` onto the Flipper's SD card
-    /// at `/ext/subghz/<name>_<id>.sub` over USB. The TX menu and `:pushflipper` use the bulk path.
+    /// at `/ext/subghz/<name>_<id>.sub` over USB. Flushes known HiTag2 / KeeLoq `BF_` keys to the
+    /// local config first. The TX menu and `:pushflipper` use the bulk path.
     #[allow(dead_code)]
     pub fn push_to_flipper(&mut self, id: u32) {
         let Some(capture) = self.captures.iter().find(|c| c.id == id).cloned() else {
             self.last_error = Some(format!("Capture #{id:02} not found"));
             return;
         };
+        let local = persist_crypto_keys_locally(&capture, self.storage.config_dir());
+        // Drop UI memos so Flipper key bytes see a freshly flushed hitag2_keys entry.
+        self.hitag2_key_memo.set(None);
+        self.hitag2_offer_memo.set(None);
         let (bytes, path, kind) = match flipper_push_payload(&capture, &self.protocols, true) {
             Ok(v) => v,
             Err(e) => {
@@ -391,7 +441,12 @@ impl App {
         };
         match self.write_push_to_flipper(&path, &bytes) {
             Ok(()) => {
-                self.status_message = Some(format!("Pushed {kind} .sub to Flipper {path} (USB)"));
+                let mut msg = format!("Pushed {kind} .sub to Flipper {path} (USB)");
+                if let Some(local) = local {
+                    msg.push_str(" · ");
+                    msg.push_str(&local);
+                }
+                self.status_message = Some(msg);
             }
             Err(e) => self.last_error = Some(e),
         }
@@ -400,7 +455,8 @@ impl App {
     /// `:pushflipper`: push every capture the list shows (filter + Unknown setting) to
     /// `/ext/subghz` over USB. One Flipper **key** `.sub` (with crypto key) per remote; further
     /// presses of the same remote go as RAW when possible, so the same HiTag2/KeeLoq key is not
-    /// written many times. Skips ones with neither a key file nor raw pairs.
+    /// written many times. Known crypto keys are flushed to the local config first. Skips ones
+    /// with neither a key file nor raw pairs.
     pub fn push_all_visible_to_flipper(&mut self) {
         if self.flipper_for_push().is_none() {
             self.last_error = Some(Self::no_flipper_for_push_msg());
@@ -411,6 +467,17 @@ impl App {
             self.status_message = Some("No captures to push (the list is empty)".to_string());
             return;
         }
+        let config_dir = self.storage.config_dir().to_path_buf();
+        let mut local_notes = 0usize;
+        for &i in &view {
+            if let Some(c) = self.captures.get(i) {
+                if persist_crypto_keys_locally(c, &config_dir).is_some() {
+                    local_notes += 1;
+                }
+            }
+        }
+        self.hitag2_key_memo.set(None);
+        self.hitag2_offer_memo.set(None);
         let mut key_remotes = std::collections::HashSet::<String>::new();
         let jobs: Vec<(u32, Result<(Vec<u8>, String, &'static str), String>)> = view
             .iter()
@@ -450,6 +517,9 @@ impl App {
             return;
         }
         let mut msg = format!("Pushed {ok} of {total} to Flipper (/ext/subghz)");
+        if local_notes > 0 {
+            msg.push_str(&format!(" · synced {local_notes} local key file(s)"));
+        }
         if skipped > 0 {
             msg.push_str(&format!(" · {skipped} skipped (no key/RAW or duplicate key)"));
         }
@@ -524,6 +594,27 @@ mod tests {
         assert!(show_key_decoded(&c));
         assert!(!delete_key_offered(&c), "no saved HiTag2/BF key");
         assert!(capture_crypto_key_status_text(&c).is_none(), "no crypto key without keystore hit");
+    }
+
+    #[test]
+    fn persist_crypto_keys_writes_keeloq_user_keystore() {
+        let dir = std::env::temp_dir().join(format!("kat_push_persist_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut c = Capture::from_pairs(1, 433_920_000, Vec::new());
+        c.status = CaptureStatus::Decoded;
+        let name = "BF_00D0921";
+        crate::protocols::keeloq_common::add_keeloq_key(crate::protocols::keeloq_common::MfKey {
+            name: name.into(),
+            learning: 8,
+            key: 0xABCD_EF12_3400_0000,
+        });
+        c.serial = Some(0x00D0_921);
+        let note = persist_crypto_keys_locally(&c, &dir);
+        assert!(note.as_ref().is_some_and(|n| n.contains(name)), "{note:?}");
+        let text = std::fs::read_to_string(dir.join("keeloq_mfcodes_user")).unwrap();
+        assert!(text.contains(name), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
