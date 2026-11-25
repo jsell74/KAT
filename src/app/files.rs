@@ -76,13 +76,32 @@ pub(super) fn same_decoded_signal(a: &Capture, b: &Capture) -> bool {
 
 /// Whether two captures are the same remote for the **list** clean filter (`U` / `ignore_duplicates`):
 /// same non-empty serial. Captures without a serial are never list-duplicates this way. With
-/// `ignore_duplicates`, receive/import also replace older rows of that serial so the latest press
-/// stays in memory for push/export/session.
+/// `ignore_duplicates`, receive/import keep up to [`KEEP_PER_SERIAL`] presses (UI/push show the
+/// latest; HiTag2/KeeLoq recovery needs a prior hop).
 pub(super) fn same_remote_by_serial(a: &Capture, b: &Capture) -> bool {
     match (a.serial, b.serial) {
         (Some(sa), Some(sb)) => sa == sb,
         _ => false,
     }
+}
+
+/// Max captures of one serial kept in memory when `ignore_duplicates` is on. The list filter still
+/// shows one (latest); a second hop stays for HiTag2 Hell / KeeLoq magic-serial.
+pub(super) const KEEP_PER_SERIAL: usize = 2;
+
+/// Drop oldest same-serial captures (by id) until at most `keep` remain.
+pub(super) fn trim_same_serial(captures: &mut Vec<Capture>, serial: u32, keep: usize) {
+    let mut ids: Vec<u32> = captures
+        .iter()
+        .filter(|c| c.serial == Some(serial))
+        .map(|c| c.id)
+        .collect();
+    if ids.len() <= keep {
+        return;
+    }
+    ids.sort_unstable();
+    let drop: std::collections::HashSet<u32> = ids[..ids.len() - keep].iter().copied().collect();
+    captures.retain(|c| !drop.contains(&c.id));
 }
 
 /// Whether the list already has this signal ([same_decoded_signal]).
@@ -180,20 +199,20 @@ impl Importer<'_> {
     }
 
     /// Add `capture` unless an exact copy is already listed (`ignore_duplicates`). A newer press
-    /// of the same serial (higher counter, or no counters to compare) replaces older rows so
-    /// push/export/session keep the latest rolling; an older counter is skipped. Live receive
-    /// always replaces by arrival order ([App::list_received]).
+    /// of the same serial trims to [`KEEP_PER_SERIAL`] − 1 older hops then appends (UI shows the
+    /// latest; BF keeps a second frame). An older/equal counter is skipped. Live receive uses
+    /// arrival order ([App::list_received]).
     fn add(&mut self, mut capture: Capture, path: &Path) -> bool {
         if self.ignore_duplicates {
             if is_duplicate(self.captures, &capture) {
                 return false;
             }
             if let Some(serial) = capture.serial {
-                if let Some(existing) = self.captures.iter().find(|c| c.serial == Some(serial)) {
+                if let Some(existing) = self.captures.iter().rev().find(|c| c.serial == Some(serial)) {
                     match (existing.counter, capture.counter) {
                         // Same or older rolling: keep what is listed (re-import / dual frames).
                         (Some(old), Some(new)) if new <= old => return false,
-                        _ => self.captures.retain(|c| c.serial != Some(serial)),
+                        _ => trim_same_serial(self.captures, serial, KEEP_PER_SERIAL.saturating_sub(1)),
                     }
                 }
             }
@@ -417,6 +436,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn trim_same_serial_keeps_the_newest() {
+        let mut caps: Vec<Capture> = (1..=5)
+            .map(|id| {
+                let mut c = Capture::from_pairs(id, 433_920_000, Vec::new());
+                c.serial = Some(0xABC);
+                c.counter = Some(id as u16);
+                c
+            })
+            .collect();
+        caps.push({
+            let mut c = Capture::from_pairs(9, 433_920_000, Vec::new());
+            c.serial = Some(0xDEF);
+            c
+        });
+        trim_same_serial(&mut caps, 0xABC, KEEP_PER_SERIAL);
+        let left: Vec<u32> = caps.iter().filter(|c| c.serial == Some(0xABC)).map(|c| c.id).collect();
+        assert_eq!(left, [4, 5], "kept newest two of serial ABC");
+        assert!(caps.iter().any(|c| c.serial == Some(0xDEF)));
+    }
+
     /// A RAW `.sub` with `ignore_duplicates`: one capture per serial (latest rolling); importing
     /// it again adds nothing (also when its name says `.SUB`).
     #[test]
@@ -443,14 +483,17 @@ mod tests {
         assert!(matches!(first, FileImport::Added(n) if (1..=15).contains(&n)), "{first:?}");
         assert_eq!(again, FileImport::Nothing("its signals are already in the list".to_string()));
         let serials: std::collections::HashSet<_> = caps.iter().filter_map(|c| c.serial).collect();
-        assert_eq!(caps.len(), serials.len(), "one capture per serial");
+        for &s in &serials {
+            let n = caps.iter().filter(|c| c.serial == Some(s)).count();
+            assert!(n <= KEEP_PER_SERIAL, "serial {s:08X}: {n}");
+        }
         assert!(caps.iter().all(|c| c.protocol.is_some()), "no Unknown capture of the whole file");
         assert_eq!(source.as_deref(), Some("KIA/Kia3_5cl_5op_5tr.sub"));
     }
 
-    /// Honda V5 long frames: with `ignore_duplicates`, each serial keeps only the **latest** press
-    /// (rolling/counter for push/export). With duplicates kept, every press is listed. Re-import
-    /// with ignore on still adds nothing (exact copies already listed).
+    /// Honda V5 long frames: with `ignore_duplicates`, each serial keeps up to [`KEEP_PER_SERIAL`]
+    /// hops (latest for UI/push, prior for BF). With duplicates kept, every press is listed.
+    /// Re-import with ignore on still adds nothing (exact copies already listed).
     #[test]
     fn every_press_of_a_long_frame_remote_is_listed() {
         crate::protocols::keys::load_keystore_from_embedded();
@@ -466,14 +509,12 @@ mod tests {
             assert!(matches!(first, FileImport::Added(n) if (1..=10).contains(&n)), "{first:?}");
             assert_eq!(imp.import(src).1, FileImport::Nothing("its signals are already in the list".to_string()));
         }
-        // One row per serial: the last rolling of that remote.
         let serials: std::collections::HashSet<_> = caps.iter().filter_map(|c| c.serial).collect();
-        assert_eq!(
-            caps.len(),
-            serials.len(),
-            "one capture per serial, got {:?}",
-            caps.iter().map(|c| (c.serial, c.counter)).collect::<Vec<_>>()
-        );
+        assert!(!serials.is_empty());
+        for &s in &serials {
+            let n = caps.iter().filter(|c| c.serial == Some(s)).count();
+            assert!(n <= KEEP_PER_SERIAL, "serial {s:08X}: {n} > {KEEP_PER_SERIAL}");
+        }
         assert!(caps.iter().any(|c| c.counter == Some(0x464C)), "latest counter kept");
 
         let (mut reg2, mut caps2, mut next2) = (ProtocolRegistry::new(), Vec::new(), 1u32);
