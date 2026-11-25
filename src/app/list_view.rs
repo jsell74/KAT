@@ -266,9 +266,9 @@ fn term_fits(term: &Term, c: &Capture) -> bool {
 
 /// The captures the list shows under `filter` and `sort`: indexes into `captures`, in the order
 /// of the list's rows. With `show_unknown` false (config `show_unknown_signals`), Unknown captures
-/// are left out. With `hide_duplicates` true (config `ignore_duplicates`), later rows that share
-/// the same serial as an earlier kept row are left out (one row per remote serial; first wins).
-/// Captures without a serial are not collapsed this way. Receive/import still keeps every press.
+/// are left out. With `hide_duplicates` true (config `ignore_duplicates`), one row per remote
+/// serial — the **latest** kept (last wins), so push/export see the newest rolling/counter.
+/// Captures without a serial are not collapsed this way.
 pub(super) fn visible(
     captures: &[Capture],
     filter: &str,
@@ -285,12 +285,9 @@ pub(super) fn visible(
         if !terms.iter().all(|term| term_fits(term, &captures[i])) {
             continue;
         }
-        if hide_duplicates
-            && rows
-                .iter()
-                .any(|&j| super::files::same_remote_by_serial(&captures[j], &captures[i]))
-        {
-            continue;
+        if hide_duplicates {
+            // Drop an earlier row of the same serial; this later press becomes the one shown.
+            rows.retain(|&j| !super::files::same_remote_by_serial(&captures[j], &captures[i]));
         }
         rows.push(i);
     }
@@ -683,29 +680,29 @@ mod tests {
     }
 
     /// List duplicates are by serial: later presses of the same remote (different button/counter)
-    /// collapse to the first row; a different serial stays visible. No serial → not collapsed.
+    /// collapse to the **latest** row; a different serial stays visible. No serial → not collapsed.
     #[test]
     fn list_duplicates_are_by_serial() {
         let mut list = list();
-        // #1 and #3 already share serial 0x0A1B2C3 (Lock then Unlock): hide_duplicates keeps #1 only.
+        // #1 and #3 share serial 0x0A1B2C3 (Lock then Unlock): hide_duplicates keeps #3 (last).
         assert_eq!(visible(&list, "", Sort::default(), true, false).len(), 6);
-        assert_eq!(visible(&list, "", Sort::default(), true, true), vec![0, 1, 3, 4, 5]);
-        // Exact clone of #1: still one row for that serial.
+        assert_eq!(visible(&list, "", Sort::default(), true, true), vec![1, 2, 3, 4, 5]);
+        // Exact clone of #1 at the end: that serial's row becomes the clone (last wins).
         let mut dup = list[0].clone();
         dup.id = 99;
         list.push(dup);
         assert_eq!(visible(&list, "", Sort::default(), true, false).len(), 7);
-        assert_eq!(visible(&list, "", Sort::default(), true, true), vec![0, 1, 3, 4, 5]);
-        // Another press of #2's serial with a new counter: still one row for that serial.
+        assert_eq!(visible(&list, "", Sort::default(), true, true), vec![1, 3, 4, 5, 6]);
+        // Another press of #2's serial with a new counter: that serial's row is the new press.
         let mut again = list[1].clone();
         again.id = 7;
         again.counter = Some(0x0201);
         again.button = Some(0x01);
         list.push(again);
-        assert_eq!(visible(&list, "", Sort::default(), true, true), vec![0, 1, 3, 4, 5]);
+        assert_eq!(visible(&list, "", Sort::default(), true, true), vec![3, 4, 5, 6, 7]);
         // Two Unknowns without serial both stay (serial rule does not merge them).
         list.push(Capture::from_pairs(8, 433_920_000, Vec::new()));
-        assert_eq!(visible(&list, "", Sort::default(), true, true), vec![0, 1, 3, 4, 5, 8]);
+        assert_eq!(visible(&list, "", Sort::default(), true, true), vec![3, 4, 5, 6, 7, 8]);
     }
 
     #[test]
