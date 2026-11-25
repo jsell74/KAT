@@ -8,7 +8,8 @@
 //! With `autobf` on, KeeLoq magic-serial and HiTag2 Hell searches also start automatically when a
 //! capture without a key appears and the search has enough presses (KeeLoq: two hop codes; HiTag2:
 //! a second press of the same remote). They still wait if another long search runs. One remote
-//! (same serial / HiTag2 UID) is never searched twice: later captures of that remote share the key.
+//! (same serial / HiTag2 UID) is normally searched once: later captures share the key. If a saved
+//! key no longer verifies a new hop (resync), that key is dropped and the search runs again.
 //! A frame of PSA's adaptive AM path that the fast path cannot decrypt (`PSA [unchecked]`, see
 //! `protocols/psa.rs`) waits here, outside the list, and joins it only if its key is found: a
 //! genuine TEA frame decrypts in a fraction of a second, noise never does. A child module of `app`
@@ -19,9 +20,12 @@ use std::collections::VecDeque;
 use super::App;
 use crate::capture::{Capture, CaptureStatus, KeyRecovery};
 use crate::protocols::{
-    psa_needs_key_search, psa_search_label, PsaBruteForceHit, PsaBruteForceOutcome, PSA_SEARCH_LABEL_ALL,
+    hitag2_key_known, psa_needs_key_search, psa_search_label, PsaBruteForceHit, PsaBruteForceOutcome,
+    PSA_SEARCH_LABEL_ALL,
 };
+use crate::protocols::hitag2_keys;
 use crate::protocols::keeloq_bf as bf;
+use crate::protocols::keeloq_common::{self, remove_keeloq_keys};
 
 /// A key search waiting for the background job.
 pub(super) enum Waiting {
@@ -123,28 +127,80 @@ impl App {
         })
     }
 
+    /// Drop a HiTag2 UID key that no longer verifies `capture`'s hop (resync). Clears
+    /// `key_recovery` on that remote so autobf may search again. Returns whether a key was dropped.
+    fn invalidate_stale_hitag2_key(&mut self, uid: u32, capture: &Capture) -> bool {
+        if hitag2_keys::find(uid).and_then(|r| r.key).is_none() {
+            return false;
+        }
+        if hitag2_key_known(capture.protocol_name(), &capture.decoded_signal()) {
+            return false;
+        }
+        if !hitag2_keys::forget_key(uid) {
+            return false;
+        }
+        for c in self.captures.iter_mut() {
+            if super::hitag2_bf::frame_of(c).is_ok_and(|f| f.uid == uid) {
+                c.key_recovery = None;
+            }
+        }
+        self.hitag2_key_memo.set(None);
+        self.hitag2_offer_memo.set(None);
+        true
+    }
+
+    /// Drop a recovered KeeLoq `BF_<serial>` that no longer decrypts this Unknown frame. Embedded
+    /// manufacturer keys stay. Returns whether a BF key was removed.
+    fn invalidate_stale_keeloq_bf_key(&mut self, serial: u32) -> bool {
+        let name = format!("BF_{serial:07X}");
+        if !keeloq_common::keeloq_keystore().iter().any(|e| e.name == name) {
+            return false;
+        }
+        let removed = remove_keeloq_keys(&[name.as_str()]);
+        let file_removed =
+            crate::keystore::remove_user_keys(self.storage.config_dir(), &[name.as_str()]).unwrap_or(0);
+        if removed == 0 && file_removed == 0 {
+            return false;
+        }
+        for c in self.captures.iter_mut() {
+            if Self::keeloq_remote_serial(c) == Some(serial) {
+                c.key_recovery = None;
+            }
+        }
+        true
+    }
+
     /// Queue the key search of each listed capture in `ids` that needs one and has no result yet
-    /// (`autobf`; nothing when it is off). PSA, KeeLoq and HiTag2. At most one search per remote
-    /// serial / HiTag2 UID: later presses share the same key.
+    /// (`autobf`; nothing when it is off). PSA, KeeLoq and HiTag2. One search per remote unless a
+    /// saved key fails to verify a new hop — then that key is forgotten and the search runs again.
     pub(super) fn auto_bf_listed(&mut self, ids: impl IntoIterator<Item = u32>) {
         if !self.storage.config.autobf {
             return;
         }
         for id in ids {
-            let Some(c) = self.captures.iter().find(|c| c.id == id) else { continue };
-            if c.key_recovery.is_some() || self.key_search_planned(id) {
+            let Some(c) = self.captures.iter().find(|c| c.id == id).cloned() else { continue };
+            if self.key_search_planned(id) {
                 continue;
             }
             // v1.22.4: PSA needs `data` as well as `data_extra`.
             if psa_needs_key_search(c.protocol_name(), c.serial, c.data, c.data_extra) {
+                if c.key_recovery.is_some() {
+                    continue;
+                }
                 if self.psa_search_for_serial_planned(c.serial) {
                     continue;
                 }
                 self.auto_bf.waiting.push_back(Waiting::Listed { id, asked: false });
                 continue;
             }
-            if Self::keeloq_bf_offered(c) && self.keeloq_autobf_ready(id) {
-                let Some(serial) = Self::keeloq_remote_serial(c) else { continue };
+            if Self::keeloq_bf_offered(&c) && self.keeloq_autobf_ready(id) {
+                let Some(serial) = Self::keeloq_remote_serial(&c) else { continue };
+                // Unknown frame but a recovered BF_ key is still on disk/session → resync.
+                if self.invalidate_stale_keeloq_bf_key(serial) {
+                    self.status_message = Some(format!(
+                        "Saved KeeLoq key no longer fits remote {serial:07X} — recovering…"
+                    ));
+                }
                 if self.keeloq_remote_has_key_result(serial)
                     || self.keeloq_search_for_serial_planned(serial)
                 {
@@ -153,8 +209,14 @@ impl App {
                 self.auto_bf.waiting.push_back(Waiting::Keeloq { id });
                 continue;
             }
-            if self.hitag2_bf_offered(c) && self.hitag2_autobf_ready(id) {
-                let Ok(frame) = super::hitag2_bf::frame_of(c) else { continue };
+            if self.hitag2_bf_offered(&c) && self.hitag2_autobf_ready(id) {
+                let Ok(frame) = super::hitag2_bf::frame_of(&c) else { continue };
+                if self.invalidate_stale_hitag2_key(frame.uid, &c) {
+                    self.status_message = Some(format!(
+                        "Saved HiTag2 key no longer fits remote {:08X} — recovering…",
+                        frame.uid
+                    ));
+                }
                 if self.hitag2_remote_has_key_result(frame.uid)
                     || self.hitag2_search_for_uid_planned(frame.uid)
                 {
