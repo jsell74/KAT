@@ -8,7 +8,8 @@
 //! there the key only confirms the remote's frames, and its IV is assumed to be Renault V1's (not
 //! confirmed against a real remote). A search covers up to 2^19 layer-0
 //! candidates, about 20 minutes on a 16-thread CPU with AVX2 (an hour without), and stops at the
-//! key, so half that on average; it runs only when asked, never through `autobf`.
+//! key, so half that on average. With `autobf` it also starts when a second press is listed; a
+//! saved key that no longer verifies a new hop is dropped and the search runs again.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
