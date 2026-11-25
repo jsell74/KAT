@@ -134,8 +134,8 @@ fn received_captures(
 
 impl App {
     /// [received_captures] of a burst into the list. With `ignore_duplicates` (default): an exact
-    /// copy already in the list is skipped; a new press of the same serial replaces the older row
-    /// so push/export/session keep the latest rolling/counter. With duplicates kept, every press
+    /// copy already in the list is skipped; a new press of the same serial keeps up to two hops
+    /// (latest for UI/push, prior for HiTag2/KeeLoq recovery). With duplicates kept, every press
     /// is listed, and only a repeat of a signal on the air less than 500 ms before is skipped, as
     /// a Flipper's receive history does: the same press still going, or reported twice (by the AM
     /// and FM paths, or on both sides of a long transmission's cut).
@@ -188,19 +188,24 @@ impl App {
 
 impl App {
     /// List one received capture unless the duplicate rules skip it. With `ignore_duplicates`: an
-    /// exact copy already in the list is skipped; a new press of the same serial replaces older
-    /// rows so push/export/session keep the latest rolling/counter. With duplicates kept, a repeat
-    /// on the air within 500 ms is skipped. Returns its id if listed.
+    /// exact copy already in the list is skipped; a new press of the same serial keeps at most
+    /// [`super::files::KEEP_PER_SERIAL`] hops (UI/push show the latest; HiTag2/KeeLoq BF need a
+    /// second). With duplicates kept, a repeat on the air within 500 ms is skipped. Returns its id
+    /// if listed.
     pub(super) fn list_received(&mut self, mut capture: Capture) -> Option<u32> {
         if self.storage.config.ignore_duplicates {
             if self.capture_duplicate_of_existing(&capture) {
                 return None;
             }
-            // Same remote (serial): drop older presses so the list holds the latest only.
+            // Same remote: keep one prior hop for recovery, drop older ones, then append this press.
             if let Some(serial) = capture.serial {
                 let selected_id =
                     self.selected_capture.and_then(|i| self.captures.get(i)).map(|c| c.id);
-                self.captures.retain(|c| c.serial != Some(serial));
+                super::files::trim_same_serial(
+                    &mut self.captures,
+                    serial,
+                    super::files::KEEP_PER_SERIAL.saturating_sub(1),
+                );
                 self.selected_capture =
                     selected_id.and_then(|id| self.captures.iter().position(|c| c.id == id));
             }
