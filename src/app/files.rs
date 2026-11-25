@@ -74,9 +74,10 @@ pub(super) fn same_decoded_signal(a: &Capture, b: &Capture) -> bool {
         && a.counter == b.counter
 }
 
-/// Whether two captures are the same remote for the **list** clean filter (`U` / `ignore_duplicates`
-/// display): same non-empty serial. Captures without a serial are never list-duplicates this way.
-/// Receive/import still uses [same_decoded_signal] so multiple presses of one serial stay in memory.
+/// Whether two captures are the same remote for the **list** clean filter (`U` / `ignore_duplicates`):
+/// same non-empty serial. Captures without a serial are never list-duplicates this way. With
+/// `ignore_duplicates`, receive/import also replace older rows of that serial so the latest press
+/// stays in memory for push/export/session.
 pub(super) fn same_remote_by_serial(a: &Capture, b: &Capture) -> bool {
     match (a.serial, b.serial) {
         (Some(sa), Some(sb)) => sa == sb,
@@ -178,11 +179,24 @@ impl Importer<'_> {
         (name, result)
     }
 
-    /// Add `capture` unless the list has it (and duplicates are ignored); it gets the next id and
-    /// its source file. Repeats within one file are merged before this, either way.
+    /// Add `capture` unless an exact copy is already listed (`ignore_duplicates`). A newer press
+    /// of the same serial (higher counter, or no counters to compare) replaces older rows so
+    /// push/export/session keep the latest rolling; an older counter is skipped. Live receive
+    /// always replaces by arrival order ([App::list_received]).
     fn add(&mut self, mut capture: Capture, path: &Path) -> bool {
-        if self.ignore_duplicates && is_duplicate(self.captures, &capture) {
-            return false;
+        if self.ignore_duplicates {
+            if is_duplicate(self.captures, &capture) {
+                return false;
+            }
+            if let Some(serial) = capture.serial {
+                if let Some(existing) = self.captures.iter().find(|c| c.serial == Some(serial)) {
+                    match (existing.counter, capture.counter) {
+                        // Same or older rolling: keep what is listed (re-import / dual frames).
+                        (Some(old), Some(new)) if new <= old => return false,
+                        _ => self.captures.retain(|c| c.serial != Some(serial)),
+                    }
+                }
+            }
         }
         capture.id = *self.next_id;
         *self.next_id += 1;
@@ -403,8 +417,8 @@ mod tests {
         }
     }
 
-    /// A RAW `.sub` adds one capture per distinct decode; importing it again adds nothing (it used
-    /// to add an "Unknown" capture of the whole file), also when its name says `.SUB`.
+    /// A RAW `.sub` with `ignore_duplicates`: one capture per serial (latest rolling); importing
+    /// it again adds nothing (also when its name says `.SUB`).
     #[test]
     fn reimporting_a_sub_adds_nothing() {
         crate::protocols::keys::load_keystore_from_embedded();
@@ -414,25 +428,29 @@ mod tests {
             return;
         }
         let (mut reg, mut caps, mut next) = (ProtocolRegistry::new(), Vec::new(), 1u32);
-        let mut imp = importer(&mut reg, &mut caps, &mut next, true);
-        let (name, first) = imp.import(src);
-        assert_eq!((name.as_str(), &first), ("Kia3_5cl_5op_5tr.sub", &FileImport::Added(15)));
-        let dir = scratch("upper");
-        let upper = dir.join("Garage.SUB");
-        std::fs::copy(src, &upper).unwrap();
-        let (_, again) = imp.import(&upper);
+        let (name, first, again, source) = {
+            let mut imp = importer(&mut reg, &mut caps, &mut next, true);
+            let (name, first) = imp.import(src);
+            let dir = scratch("upper");
+            let upper = dir.join("Garage.SUB");
+            std::fs::copy(src, &upper).unwrap();
+            let (_, again) = imp.import(&upper);
+            let source = caps.first().and_then(|c| c.source_file.clone());
+            let _ = std::fs::remove_dir_all(&dir);
+            (name, first, again, source)
+        };
+        assert_eq!(name.as_str(), "Kia3_5cl_5op_5tr.sub");
+        assert!(matches!(first, FileImport::Added(n) if (1..=15).contains(&n)), "{first:?}");
         assert_eq!(again, FileImport::Nothing("its signals are already in the list".to_string()));
-        assert_eq!(caps.len(), 15);
+        let serials: std::collections::HashSet<_> = caps.iter().filter_map(|c| c.serial).collect();
+        assert_eq!(caps.len(), serials.len(), "one capture per serial");
         assert!(caps.iter().all(|c| c.protocol.is_some()), "no Unknown capture of the whole file");
-        assert_eq!(caps.iter().map(|c| c.id).collect::<Vec<_>>(), (1..=15).collect::<Vec<_>>());
-        assert_eq!(caps[0].source_file.as_deref(), Some("KIA/Kia3_5cl_5op_5tr.sub"));
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(source.as_deref(), Some("KIA/Kia3_5cl_5op_5tr.sub"));
     }
 
-    /// Every press of a long-frame remote is listed. Honda V5's frame is 135 bits: `data`, its
-    /// first 64, is the same for every press of a button, and only the first press of each was
-    /// listed (4 captures of this file's 10: five presses, two frames each). Importing the file
-    /// again still adds nothing.
+    /// Honda V5 long frames: with `ignore_duplicates`, each serial keeps only the **latest** press
+    /// (rolling/counter for push/export). With duplicates kept, every press is listed. Re-import
+    /// with ignore on still adds nothing (exact copies already listed).
     #[test]
     fn every_press_of_a_long_frame_remote_is_listed() {
         crate::protocols::keys::load_keystore_from_embedded();
@@ -442,17 +460,30 @@ mod tests {
             return;
         }
         let (mut reg, mut caps, mut next) = (ProtocolRegistry::new(), Vec::new(), 1u32);
-        let mut imp = importer(&mut reg, &mut caps, &mut next, true);
-        assert_eq!(imp.import(src).1, FileImport::Added(10));
-        assert_eq!(imp.import(src).1, FileImport::Nothing("its signals are already in the list".to_string()));
-        let counters: Vec<u16> = caps.iter().filter_map(|c| c.counter).collect();
+        {
+            let mut imp = importer(&mut reg, &mut caps, &mut next, true);
+            let first = imp.import(src).1;
+            assert!(matches!(first, FileImport::Added(n) if (1..=10).contains(&n)), "{first:?}");
+            assert_eq!(imp.import(src).1, FileImport::Nothing("its signals are already in the list".to_string()));
+        }
+        // One row per serial: the last rolling of that remote.
+        let serials: std::collections::HashSet<_> = caps.iter().filter_map(|c| c.serial).collect();
+        assert_eq!(
+            caps.len(),
+            serials.len(),
+            "one capture per serial, got {:?}",
+            caps.iter().map(|c| (c.serial, c.counter)).collect::<Vec<_>>()
+        );
+        assert!(caps.iter().any(|c| c.counter == Some(0x464C)), "latest counter kept");
+
+        let (mut reg2, mut caps2, mut next2) = (ProtocolRegistry::new(), Vec::new(), 1u32);
+        {
+            let mut keep = importer(&mut reg2, &mut caps2, &mut next2, true);
+            keep.ignore_duplicates = false;
+            assert_eq!(keep.import(src).1, FileImport::Added(10));
+        }
+        let counters: Vec<u16> = caps2.iter().filter_map(|c| c.counter).collect();
         assert_eq!(counters, [0x4648, 0x4648, 0x4649, 0x4649, 0x464A, 0x464A, 0x464B, 0x464B, 0x464C, 0x464C]);
-        // The same press is still one capture: equal but for the counter is not a duplicate,
-        // equal with it is.
-        let mut next_press = caps[0].clone();
-        assert!(is_duplicate(&caps, &next_press));
-        next_press.counter = Some(0x4700);
-        assert!(!is_duplicate(&caps, &next_press));
     }
 
     /// With duplicates kept (`ignore_duplicates = false`), importing a file again adds its
