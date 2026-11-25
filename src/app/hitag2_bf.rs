@@ -304,6 +304,9 @@ impl App {
             Ok(path) => format!("saved in {}", path.display()),
             Err(e) => format!("not saved ({e}), usable until KAT exits"),
         };
+        // Drop UI memos so Show key / Flipper export see the new key immediately.
+        self.hitag2_key_memo.set(None);
+        self.hitag2_offer_memo.set(None);
         let fresh = mark_recovered(&mut self.captures, uid);
         // Hitag2 RKE is decode-only (no verified transmitter): the key is recovered and saved, but
         // KAT does not send fresh codes for it, unlike Fiat V1 / Renault V1 / Fiat V2.

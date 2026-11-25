@@ -40,9 +40,21 @@ fn flipper_crypto_remote_id(capture: &Capture) -> Option<String> {
     capture.serial.map(|s| format!("serial:{s:08X}"))
 }
 
+/// Stable Flipper SD name tag for a crypto key `.sub`: serial/UID so a later push (new key after
+/// resync) overwrites the previous file instead of leaving the old key beside a new id-based name.
+fn flipper_key_file_tag(capture: &Capture) -> String {
+    match flipper_crypto_remote_id(capture) {
+        Some(id) => safe_stem(&id.replace(':', "_")),
+        None => format!("{:02}", capture.id),
+    }
+}
+
 /// Bytes and SD path for a capture pushed to `/ext/subghz` (key file preferred, else RAW).
 /// `allow_key_file`: when false, never write a Flipper key `.sub` (used so `:pushflipper` does not
 /// push the same crypto key once per press of the same remote — only the first keeps the key file).
+/// Key `.sub` bytes come from live `to_flipper_key` / `hitag2_keys` (no stale memo): after re-recover
+/// the Hitag2 Key line is the new key. Key paths are stable per remote so `storage remove` + write
+/// replaces an older key file on the Flipper.
 fn flipper_push_payload(
     capture: &Capture,
     protocols: &ProtocolRegistry,
@@ -71,8 +83,12 @@ fn flipper_push_payload(
     } else {
         App::default_export_filename(capture)
     };
-    // Capture ID keeps each push unique when several remotes share the same name.
-    let name = format!("{}_{:02}.sub", safe_stem(&stem), capture.id);
+    let tag = if kind == "key" {
+        flipper_key_file_tag(capture)
+    } else {
+        format!("{:02}", capture.id)
+    };
+    let name = format!("{}_{}.sub", safe_stem(&stem), tag);
     Ok((bytes, format!("{SUBGHZ_DIR}/{name}"), kind))
 }
 
@@ -511,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn push_payload_names_include_the_capture_id() {
+    fn push_payload_key_path_is_stable_per_remote() {
         let reg = ProtocolRegistry::new();
         let text = "Filetype: Flipper SubGhz Key File\nVersion: 1\nFrequency: 433920000\n\
                     Preset: FuriHalSubGhzPreset2FSKDev476Async\nProtocol: Kia V0\nBit: 61\n\
@@ -521,7 +537,16 @@ mod tests {
         let (_, path, kind) = flipper_push_payload(&c, &reg, true).unwrap();
         assert_eq!(kind, "key");
         assert!(path.starts_with("/ext/subghz/"), "{path}");
-        assert!(path.ends_with("_07.sub"), "{path}");
+        // Same remote → same path (overwrite on Flipper); not capture-id based.
+        let mut again = c.clone();
+        again.id = 99;
+        let (_, path2, _) = flipper_push_payload(&again, &reg, true).unwrap();
+        assert_eq!(path, path2, "re-push must overwrite the same .sub");
+        assert!(
+            path.contains("serial_") || c.serial.is_none(),
+            "expected serial tag in {path}, serial={:?}",
+            c.serial
+        );
         let empty = Capture::from_pairs(3, 433_920_000, Vec::new());
         assert!(flipper_push_payload(&empty, &reg, true).is_err());
     }
