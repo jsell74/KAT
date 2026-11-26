@@ -58,7 +58,8 @@ fn flipper_remote_id_hex(capture: &Capture) -> String {
 
 /// Flipper SD stem: `Protocol_SERIAL` (safe for FAT). Same remote → same stem → overwrite.
 fn flipper_push_stem(capture: &Capture) -> String {
-    let proto = safe_stem(capture.protocol_name());
+    // Spaces → `_` so Flipper/FAT names stay one token (e.g. `Kia_V0_067BD75B`).
+    let proto = safe_stem(&capture.protocol_name().replace([' ', '/'], "_"));
     format!("{proto}_{}", flipper_remote_id_hex(capture))
 }
 
@@ -630,14 +631,13 @@ mod tests {
         let key = crate::protocols::FlipperKey::parse(text).unwrap();
         let c = flipper::capture_from_key(&key, &reg, 7).unwrap();
         let (_, path, kind) = flipper_push_payload(&c, &reg, true).unwrap();
+        eprintln!("EXAMPLE_FLIPPER_PATH={path}");
         assert_eq!(kind, "key");
         assert!(path.starts_with("/ext/subghz/"), "{path}");
         assert!(path.ends_with("_key.sub"), "{path}");
+        assert!(!path.contains(' '), "no spaces in Flipper path: {path}");
         // Protocol_SERIAL_key.sub — not Year_Make_… or capture-id based.
-        assert!(
-            path.contains("Kia_V0_") || path.contains(&safe_stem(c.protocol_name())),
-            "expected protocol in {path}"
-        );
+        assert!(path.contains("Kia_V0_"), "expected protocol in {path}");
         if let Some(s) = c.serial {
             assert!(path.contains(&format!("{s:08X}")), "expected serial in {path}");
         }
