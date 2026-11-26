@@ -101,7 +101,8 @@ impl Config {
         Self {
             export_directory: config_dir.join("exports"),
             import_directory: config_dir.join("import"),
-            max_captures: 100,
+            // 0 = keep every capture in the saved session (no "newest N" eviction).
+            max_captures: 0,
             show_unknown_signals: true, // researchers need to see them
             ignore_duplicates: true,
             autobf: true,
