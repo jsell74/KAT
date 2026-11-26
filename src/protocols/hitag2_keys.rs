@@ -29,6 +29,10 @@
 //! key ([`save_key`]) and when a loaded key file names a key that fits its frame
 //! ([`adopt_file_key`]). The seed column (doctor-firmware's Renault seed) is kept but not read:
 //! KAT recovers Renault seeds from the frame itself.
+//!
+//! **No size cap / eviction.** Unlike some Flipper firmwares' fixed `HITAG2_KEY_DB_SIZE` ring,
+//! KAT's session DB and `hitag2_keys.txt` keep every distinct UID: a new remote is appended, an
+//! existing UID is replaced in place, and older remotes are never dropped to make room.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -498,6 +502,32 @@ pub(crate) mod tests {
         let text = std::fs::read_to_string(dir.join(FILE_NAME)).unwrap();
         assert!(text.starts_with(HEADER) && text.contains("5EED0003 A1A2A3A4A5A6 1 -\n"), "{text}");
         assert_eq!(find(0x5EED_0003).and_then(|r| r.key), Some([0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// More than a dozen remotes stay in the file and the session DB (no ring / eviction).
+    #[test]
+    fn save_keeps_every_remote_no_size_cap() {
+        let dir = std::env::temp_dir().join(format!("kat-hitag2-uncapped-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for i in 1u32..=25 {
+            let uid = 0x1000_0000 | i;
+            let key = [
+                i as u8,
+                (i >> 8) as u8,
+                0xAA,
+                0xBB,
+                0xCC,
+                0xDD,
+            ];
+            save_key(&dir, uid, key, 0).unwrap();
+        }
+        let text = std::fs::read_to_string(dir.join(FILE_NAME)).unwrap();
+        for i in 1u32..=25 {
+            let uid = 0x1000_0000 | i;
+            assert!(text.contains(&format!("{uid:08X} ")), "missing {uid:08X} in:\n{text}");
+            assert_eq!(find(uid).and_then(|r| r.key).map(|k| k[0]), Some(i as u8));
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
