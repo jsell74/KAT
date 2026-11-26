@@ -61,6 +61,12 @@ const TX_DIR: &str = "/ext/apps_data/kat";
 const TX_FILE: &str = "/ext/apps_data/kat/tx.sub";
 /// Where the Sub-GHz app lists saved signals (push export lands here).
 pub const SUBGHZ_DIR: &str = "/ext/subghz";
+
+/// Flipper SubGhz assets folder (firmware `subghz/assets` on the SD card).
+pub const SUBGHZ_ASSETS_DIR: &str = "/ext/subghz/assets";
+
+/// Path of the HiTag2 UID key database on the Flipper SD card (same file KAT keeps in config).
+pub const FLIPPER_HITAG2_KEYS: &str = "/ext/subghz/assets/hitag2_keys.txt";
 /// `storage write_chunk` size (scripts/flipper_replay.py sends every test file this way).
 const CHUNK: usize = 512;
 /// How long one read of the port waits for bytes (the worker's reaction time).
@@ -897,6 +903,13 @@ fn run_worker(mut console: Console, requests: Receiver<Request>, setup: WorkerSe
                 });
                 let result = (|| {
                     let _ = console.command(&format!("storage mkdir {SUBGHZ_DIR}"), Duration::from_secs(5));
+                    // Parent of assets files (e.g. hitag2_keys.txt); mkdir is idempotent.
+                    if path.starts_with(SUBGHZ_ASSETS_DIR) {
+                        let _ = console.command(
+                            &format!("storage mkdir {SUBGHZ_ASSETS_DIR}"),
+                            Duration::from_secs(5),
+                        );
+                    }
                     console.write_file(&path, &data)
                 })();
                 if let Some(f) = resume {
