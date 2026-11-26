@@ -170,6 +170,14 @@ impl App {
         true
     }
 
+    /// Drop queued automatic searches (PSA / KeeLoq / HiTag2 / unchecked). Keeps a "Recover key"
+    /// the user asked for (`asked: true`) so turning `autobf` off mid-run does not cancel that.
+    pub(super) fn auto_bf_cancel_automatic(&mut self) {
+        self.auto_bf
+            .waiting
+            .retain(|w| matches!(w, Waiting::Listed { asked: true, .. }));
+    }
+
     /// Queue the key search of each listed capture in `ids` that needs one and has no result yet
     /// (`autobf`; nothing when it is off). PSA, KeeLoq and HiTag2. One search per remote unless a
     /// saved key fails to verify a new hop — then that key is forgotten and the search runs again.
@@ -406,5 +414,26 @@ mod tests {
         assert_eq!(c.status, CaptureStatus::EncoderCapable);
         assert_eq!(c.key_recovery, Some(KeyRecovery::Recovered("PSA BF1".to_string())));
         assert!(!psa_needs_key_search(c.protocol_name(), c.serial, c.data, c.data_extra));
+    }
+
+    /// Turning `autobf` off drops queued automatic searches but keeps a user "Recover key".
+    #[test]
+    fn cancel_automatic_keeps_asked_recover_key() {
+        let mut bf = AutoBf::default();
+        bf.waiting.push_back(Waiting::Keeloq { id: 1 });
+        bf.waiting.push_back(Waiting::Listed { id: 2, asked: true });
+        bf.waiting.push_back(Waiting::Hitag2 { id: 3 });
+        bf.waiting.push_back(Waiting::Unchecked(Box::new(Capture::from_pairs(
+            9,
+            433_920_000,
+            Vec::new(),
+        ))));
+        bf.waiting
+            .retain(|w| matches!(w, Waiting::Listed { asked: true, .. }));
+        assert_eq!(bf.waiting.len(), 1);
+        assert!(matches!(
+            bf.waiting.front(),
+            Some(Waiting::Listed { id: 2, asked: true })
+        ));
     }
 }

@@ -76,6 +76,7 @@ pub const HELP_TEXT: &str = r#"KEYS
   s  S          Sort by the next column / reverse
   U             Show/hide Unknown + duplicates by serial
                 (show_unknown_signals / ignore_dups)
+  B             Auto decrypt on/off (autobf)
   i             Vehicle info (year, make, model …)
   d  u          Delete the capture / undo
                 (menu: Show key / Delete key /
@@ -126,6 +127,8 @@ COMMANDS   (ID: 4  #4  1,3,5  1 3 5  1-5)
                        by serial (U; config.ini pair)
   :keydevice gpu|cpu   KeeLoq/HiTag2 on GPU or CPU
                        (key_search_device in config.ini)
+  :autobf [on|off]     Auto decrypt / key search
+                       (PSA/KeeLoq/HiTag2; config.ini)
   :save                Write radio prefs to config.ini
   :pushflipper         Push all shown to Flipper USB
                        (/ext/subghz; same as TX menu)
