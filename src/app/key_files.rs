@@ -426,8 +426,9 @@ impl App {
         flipper.write_sd_file(path, bytes).map_err(|e| format!("Push to Flipper failed: {e:#}"))
     }
 
-    /// After a local flush: overwrite Flipper `subghz/assets/hitag2_keys.txt` with the local
-    /// config file. `Ok(None)` when there is no local file yet (nothing to mirror).
+    /// After a local flush: overwrite Flipper `subghz/assets/hitag2_keys.txt` with the **entire**
+    /// local config file (byte-for-byte mirror). No max / eviction / truncation — every UID line
+    /// in `~/.config/KAT/hitag2_keys.txt` is written. `Ok(None)` when there is no local file yet.
     fn push_hitag2_keys_file_to_flipper(&mut self) -> Result<Option<String>, String> {
         let local = self.storage.config_dir().join(hitag2_keys::FILE_NAME);
         let bytes = match std::fs::read(&local) {
@@ -438,8 +439,12 @@ impl App {
                 return Err(format!("Could not read local {}: {e}", local.display()));
             }
         };
+        // Full file → Flipper assets (write_sd_file removes then write_chunk; no line limit).
         self.write_push_to_flipper(FLIPPER_HITAG2_KEYS, &bytes)?;
-        Ok(Some(format!("hitag2_keys.txt → {FLIPPER_HITAG2_KEYS}")))
+        Ok(Some(format!(
+            "hitag2_keys.txt → {FLIPPER_HITAG2_KEYS} ({} bytes, full mirror)",
+            bytes.len()
+        )))
     }
 
     /// Push one capture's Flipper key file (preferred) or RAW `.sub` onto the Flipper's SD card
@@ -558,7 +563,7 @@ impl App {
             msg.push_str(&format!(" · synced {local_notes} local key file(s)"));
         }
         match self.push_hitag2_keys_file_to_flipper() {
-            Ok(Some(_)) => msg.push_str(" · hitag2_keys.txt → assets"),
+            Ok(Some(_)) => msg.push_str(" · hitag2_keys.txt → assets (full)"),
             Ok(None) => {}
             Err(e) => {
                 msg.push_str(" · hitag2_keys.txt not updated on Flipper");
@@ -669,6 +674,27 @@ mod tests {
             "Flipper-ARF / doctor-firmware SubGhz assets path"
         );
         assert!(FLIPPER_HITAG2_KEYS.starts_with(&format!("{SUBGHZ_DIR}/assets/")));
+    }
+
+    /// Push assets mirror reads the whole local file (no N-line / size cap before upload).
+    #[test]
+    fn hitag2_keys_mirror_bytes_are_uncapped() {
+        let dir = std::env::temp_dir().join(format!("kat_hitag2_mirror_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(hitag2_keys::FILE_NAME);
+        let mut body = String::from("# Flipper Hitag2 UID keys\n# UID KEY EPOCH SEED\n");
+        for i in 0..40u32 {
+            body.push_str(&format!("{i:08X} AABBCCDDEEFF 0 -\n"));
+        }
+        std::fs::write(&path, &body).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes.len(), body.len(), "mirror must send every byte");
+        assert_eq!(
+            String::from_utf8_lossy(&bytes).lines().filter(|l| !l.starts_with('#') && !l.is_empty()).count(),
+            40
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
