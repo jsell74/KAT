@@ -18,8 +18,10 @@
 //!   over USB (one crypto key `.sub` per remote, further presses as RAW). Single-capture push is
 //!   [`App::push_to_flipper`]. Before writing the Flipper files, Push also flushes any known
 //!   HiTag2 / KeeLoq `BF_<serial>` crypto key to the local config
-//!   (`hitag2_keys.txt` / `keeloq_mfcodes_user`) so a key only in session/UI is persisted.
-//!   SD filenames are `Protocol_SERIAL_key.sub` / `Protocol_SERIAL_RAW.sub` (stable overwrite).
+//!   (`hitag2_keys.txt` / `keeloq_mfcodes_user`) so a key only in session/UI is persisted, then
+//!   mirrors `hitag2_keys.txt` onto the Flipper at [`crate::radio::FLIPPER_HITAG2_KEYS`]
+//!   (`/ext/subghz/assets/hitag2_keys.txt`, overwrite). SD filenames are
+//!   `Protocol_SERIAL_key.sub` / `Protocol_SERIAL_RAW.sub` (stable overwrite).
 //!   Bluetooth file transfer is not used; USB is the path KAT already uses.
 
 use anyhow::Result;
@@ -34,7 +36,7 @@ use crate::protocols::hitag2_keys::{self, KeyOrder};
 use crate::protocols::keeloq_common::keeloq_keystore;
 use crate::protocols::ProtocolRegistry;
 use crate::radio::devices::RadioKind;
-use crate::radio::SUBGHZ_DIR;
+use crate::radio::{FLIPPER_HITAG2_KEYS, SUBGHZ_DIR};
 
 /// Identity of the crypto remote for Flipper push dedupe (one key file per HiTag2 UID / KeeLoq
 /// serial). `None` = no stable crypto id (still push, but do not collapse with others).
@@ -424,9 +426,26 @@ impl App {
         flipper.write_sd_file(path, bytes).map_err(|e| format!("Push to Flipper failed: {e:#}"))
     }
 
+    /// After a local flush: overwrite Flipper `subghz/assets/hitag2_keys.txt` with the local
+    /// config file. `Ok(None)` when there is no local file yet (nothing to mirror).
+    fn push_hitag2_keys_file_to_flipper(&mut self) -> Result<Option<String>, String> {
+        let local = self.storage.config_dir().join(hitag2_keys::FILE_NAME);
+        let bytes = match std::fs::read(&local) {
+            Ok(b) if !b.is_empty() => b,
+            Ok(_) => return Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(format!("Could not read local {}: {e}", local.display()));
+            }
+        };
+        self.write_push_to_flipper(FLIPPER_HITAG2_KEYS, &bytes)?;
+        Ok(Some(format!("hitag2_keys.txt → {FLIPPER_HITAG2_KEYS}")))
+    }
+
     /// Push one capture's Flipper key file (preferred) or RAW `.sub` onto the Flipper's SD card
-    /// at `/ext/subghz/<name>_<id>.sub` over USB. Flushes known HiTag2 / KeeLoq `BF_` keys to the
-    /// local config first. The TX menu and `:pushflipper` use the bulk path.
+    /// at `/ext/subghz/<Protocol_SERIAL>.sub` over USB. Flushes known HiTag2 / KeeLoq `BF_` keys to
+    /// the local config first, then mirrors `hitag2_keys.txt` onto Flipper assets. The TX menu and
+    /// `:pushflipper` use the bulk path.
     #[allow(dead_code)]
     pub fn push_to_flipper(&mut self, id: u32) {
         let Some(capture) = self.captures.iter().find(|c| c.id == id).cloned() else {
@@ -451,7 +470,19 @@ impl App {
                     msg.push_str(" · ");
                     msg.push_str(&local);
                 }
-                self.status_message = Some(msg);
+                match self.push_hitag2_keys_file_to_flipper() {
+                    Ok(Some(note)) => {
+                        msg.push_str(" · ");
+                        msg.push_str(&note);
+                        self.status_message = Some(msg);
+                    }
+                    Ok(None) => self.status_message = Some(msg),
+                    Err(e) => {
+                        msg.push_str(" · hitag2_keys.txt not updated on Flipper");
+                        self.status_message = Some(msg);
+                        self.last_error = Some(e);
+                    }
+                }
             }
             Err(e) => self.last_error = Some(e),
         }
@@ -460,8 +491,9 @@ impl App {
     /// `:pushflipper`: push every capture the list shows (filter + Unknown setting) to
     /// `/ext/subghz` over USB. One Flipper **key** `.sub` (with crypto key) per remote; further
     /// presses of the same remote go as RAW when possible, so the same HiTag2/KeeLoq key is not
-    /// written many times. Known crypto keys are flushed to the local config first. Skips ones
-    /// with neither a key file nor raw pairs.
+    /// written many times. Known crypto keys are flushed to the local config first, then
+    /// `hitag2_keys.txt` is mirrored to Flipper assets. Skips ones with neither a key file nor
+    /// raw pairs.
     pub fn push_all_visible_to_flipper(&mut self) {
         if self.flipper_for_push().is_none() {
             self.last_error = Some(Self::no_flipper_for_push_msg());
@@ -525,6 +557,14 @@ impl App {
         if local_notes > 0 {
             msg.push_str(&format!(" · synced {local_notes} local key file(s)"));
         }
+        match self.push_hitag2_keys_file_to_flipper() {
+            Ok(Some(_)) => msg.push_str(" · hitag2_keys.txt → assets"),
+            Ok(None) => {}
+            Err(e) => {
+                msg.push_str(" · hitag2_keys.txt not updated on Flipper");
+                failed.push(e);
+            }
+        }
         if skipped > 0 {
             msg.push_str(&format!(" · {skipped} skipped (no key/RAW or duplicate key)"));
         }
@@ -534,7 +574,6 @@ impl App {
             let ids: Vec<&str> = failed.iter().map(|s| s.split(':').next().unwrap_or(s.as_str())).collect();
             msg.push_str(&format!(" · {} failed ({})", failed.len(), ids.join(", ")));
             self.last_error = Some(msg);
-            // Keep the first failure detail in the log.
             if let Some(first) = failed.first() {
                 tracing::warn!("Push all to Flipper: {first}");
             }
@@ -620,6 +659,16 @@ mod tests {
         let text = std::fs::read_to_string(dir.join("keeloq_mfcodes_user")).unwrap();
         assert!(text.contains(name), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn flipper_hitag2_keys_asset_path() {
+        assert_eq!(
+            FLIPPER_HITAG2_KEYS,
+            "/ext/subghz/assets/hitag2_keys.txt",
+            "Flipper-ARF / doctor-firmware SubGhz assets path"
+        );
+        assert!(FLIPPER_HITAG2_KEYS.starts_with(&format!("{SUBGHZ_DIR}/assets/")));
     }
 
     #[test]

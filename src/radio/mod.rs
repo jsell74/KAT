@@ -30,7 +30,7 @@ pub use demodulator::LevelDuration;
 pub(crate) const USB_ACCESS_HINT: &str = "install its WinUSB driver with Zadig";
 #[cfg(not(windows))]
 pub(crate) const USB_ACCESS_HINT: &str = "check its USB permissions / udev rules";
-pub use flipper::{FlipperController, SUBGHZ_DIR};
+pub use flipper::{FlipperController, FLIPPER_HITAG2_KEYS, SUBGHZ_DIR};
 pub use hackrf::HackRfController;
 pub use rtlsdr::{RtlDevice, RtlSdrController};
 pub use soapy::{helper_main as soapy_helper_main, SoapyController, HELPER_FLAG as SOAPY_HELPER_FLAG};

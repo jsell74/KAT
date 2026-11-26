@@ -56,6 +56,12 @@ use super::tx::TxSettings;
 /// Where the Sub-GHz app lists saved signals (Push export lands here).
 pub const SUBGHZ_DIR: &str = "/ext/subghz";
 
+/// Flipper SubGhz assets folder (firmware `subghz/assets` on the SD card).
+pub const SUBGHZ_ASSETS_DIR: &str = "/ext/subghz/assets";
+
+/// Path of the HiTag2 UID key database on the Flipper SD card (same file KAT keeps in config).
+pub const FLIPPER_HITAG2_KEYS: &str = "/ext/subghz/assets/hitag2_keys.txt";
+
 // ---- the port ------------------------------------------------------------------------------------
 
 /// Every Flipper's USB console, with its USB serial when the system gives it: `configured` (config
@@ -295,6 +301,13 @@ fn run_worker(mut console: Console, requests: Receiver<Request>, setup: WorkerSe
                     Err(anyhow!("the Flipper's console is closed"))
                 } else {
                     let _ = console.command(&format!("storage mkdir {SUBGHZ_DIR}"), Duration::from_secs(5));
+                    // Parent of assets files (e.g. hitag2_keys.txt); mkdir is idempotent.
+                    if path.starts_with(SUBGHZ_ASSETS_DIR) {
+                        let _ = console.command(
+                            &format!("storage mkdir {SUBGHZ_ASSETS_DIR}"),
+                            Duration::from_secs(5),
+                        );
+                    }
                     console.write_file(&path, &data)
                 };
                 if let Some(f) = resume {
