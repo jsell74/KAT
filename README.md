@@ -349,7 +349,7 @@ Example `config.ini` (all keys optional; defaults are used if missing):
 [general]
 export_directory = ~/.config/KAT/exports
 import_directory = ~/.config/KAT/import
-max_captures = 100
+max_captures = 0
 show_unknown_signals = true
 ignore_duplicates = true
 autobf = true
