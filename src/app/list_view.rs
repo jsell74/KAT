@@ -451,29 +451,51 @@ impl App {
         hidden
     }
 
-    /// `U` / `:unknown`: show or hide Unknown captures **and** duplicates together.
-    /// Hide → `show_unknown_signals = false` and `ignore_duplicates = true`; show → the opposite.
+    /// `U` / `:unknown`: show or hide Unknown captures only (`show_unknown_signals`).
     pub fn toggle_show_unknown(&mut self) {
         self.set_show_unknown(!self.storage.config.show_unknown_signals);
     }
 
-    /// Set the clean-list pair (`show_unknown_signals` / `ignore_duplicates`), persist it, and
-    /// keep the selection on a shown capture.
+    /// Set `show_unknown_signals`, persist it, and keep the selection on a shown capture.
+    /// Does **not** change `ignore_duplicates` (use `:duplicates` / [`Self::set_ignore_duplicates`]).
     pub fn set_show_unknown(&mut self, show: bool) {
         self.storage.config.show_unknown_signals = show;
-        // U hides clutter: Unknown off and duplicates ignored; U shows both again.
-        self.storage.config.ignore_duplicates = !show;
         match self.storage.save_config() {
             Ok(()) => {
                 self.status_message = Some(if show {
-                    "Unknown and duplicates by serial shown (U hides · saved in config.ini)".to_string()
+                    "Unknown shown (U / :unknown · saved in config.ini)".to_string()
                 } else {
-                    "Unknown and duplicates by serial hidden (U shows · saved in config.ini)".to_string()
+                    "Unknown hidden (U / :unknown · saved in config.ini)".to_string()
                 });
             }
             Err(e) => {
                 self.last_error =
-                    Some(format!("List filter set, but config.ini could not be saved: {e}"));
+                    Some(format!("Unknown filter set, but config.ini could not be saved: {e}"));
+            }
+        }
+        self.keep_selection_shown();
+    }
+
+    /// `:duplicates`: show or hide duplicate presses by serial (`ignore_duplicates`).
+    pub fn toggle_ignore_duplicates(&mut self) {
+        self.set_ignore_duplicates(!self.storage.config.ignore_duplicates);
+    }
+
+    /// `ignore = true` hides later presses of the same serial; `false` lists every press.
+    pub fn set_ignore_duplicates(&mut self, ignore: bool) {
+        self.storage.config.ignore_duplicates = ignore;
+        match self.storage.save_config() {
+            Ok(()) => {
+                self.status_message = Some(if ignore {
+                    "Duplicates by serial hidden (:duplicates off · saved in config.ini)".to_string()
+                } else {
+                    "Duplicates by serial shown (:duplicates on · saved in config.ini)".to_string()
+                });
+            }
+            Err(e) => {
+                self.last_error = Some(format!(
+                    "Duplicates filter set, but config.ini could not be saved: {e}"
+                ));
             }
         }
         self.keep_selection_shown();
