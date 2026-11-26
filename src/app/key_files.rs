@@ -19,6 +19,7 @@
 //!   [`App::push_to_flipper`]. Before writing the Flipper files, Push also flushes any known
 //!   HiTag2 / KeeLoq `BF_<serial>` crypto key to the local config
 //!   (`hitag2_keys.txt` / `keeloq_mfcodes_user`) so a key only in session/UI is persisted.
+//!   SD filenames are `Protocol_SERIAL_key.sub` / `Protocol_SERIAL_RAW.sub` (stable overwrite).
 //!   Bluetooth file transfer is not used; USB is the path KAT already uses.
 
 use anyhow::Result;
@@ -44,13 +45,21 @@ fn flipper_crypto_remote_id(capture: &Capture) -> Option<String> {
     capture.serial.map(|s| format!("serial:{s:08X}"))
 }
 
-/// Stable Flipper SD name tag for a crypto key `.sub`: serial/UID so a later push (new key after
-/// resync) overwrites the previous file instead of leaving the old key beside a new id-based name.
-fn flipper_key_file_tag(capture: &Capture) -> String {
-    match flipper_crypto_remote_id(capture) {
-        Some(id) => safe_stem(&id.replace(':', "_")),
-        None => format!("{:02}", capture.id),
+/// Serial/UID hex for Flipper filenames (stable per remote). Falls back to capture id.
+fn flipper_remote_id_hex(capture: &Capture) -> String {
+    if let Ok(frame) = hitag2_bf::frame_of(capture) {
+        format!("{:08X}", frame.uid)
+    } else if let Some(s) = capture.serial {
+        format!("{s:08X}")
+    } else {
+        format!("{:02}", capture.id)
     }
+}
+
+/// Flipper SD stem: `Protocol_SERIAL` (safe for FAT). Same remote → same stem → overwrite.
+fn flipper_push_stem(capture: &Capture) -> String {
+    let proto = safe_stem(capture.protocol_name());
+    format!("{proto}_{}", flipper_remote_id_hex(capture))
 }
 
 /// Bytes to store in `hitag2_keys.txt` for a UI/session [`hitag2_keys::ShownKey`].
@@ -98,8 +107,8 @@ fn persist_crypto_keys_locally(capture: &Capture, config_dir: &Path) -> Option<S
 /// `allow_key_file`: when false, never write a Flipper key `.sub` (used so `:pushflipper` does not
 /// push the same crypto key once per press of the same remote — only the first keeps the key file).
 /// Key `.sub` bytes come from live `to_flipper_key` / `hitag2_keys` (no stale memo): after re-recover
-/// the Hitag2 Key line is the new key. Key paths are stable per remote so `storage remove` + write
-/// replaces an older key file on the Flipper.
+/// the Hitag2 Key line is the new key.
+/// Filenames are `Protocol_SERIAL[_key|_RAW].sub` so the path is stable per remote (overwrite).
 fn flipper_push_payload(
     capture: &Capture,
     protocols: &ProtocolRegistry,
@@ -123,17 +132,12 @@ fn flipper_push_payload(
             ));
         }
     };
-    let stem = if kind == "key" {
-        format!("{}_key", App::default_export_filename(capture))
-    } else {
-        App::default_export_filename(capture)
+    let stem = flipper_push_stem(capture);
+    let name = match kind {
+        "key" => format!("{stem}_key.sub"),
+        // One RAW slot per remote (latest press overwrites); unknown without serial uses capture id in stem.
+        _ => format!("{stem}_RAW.sub"),
     };
-    let tag = if kind == "key" {
-        flipper_key_file_tag(capture)
-    } else {
-        format!("{:02}", capture.id)
-    };
-    let name = format!("{}_{}.sub", safe_stem(&stem), tag);
     Ok((bytes, format!("{SUBGHZ_DIR}/{name}"), kind))
 }
 
@@ -628,16 +632,19 @@ mod tests {
         let (_, path, kind) = flipper_push_payload(&c, &reg, true).unwrap();
         assert_eq!(kind, "key");
         assert!(path.starts_with("/ext/subghz/"), "{path}");
-        // Same remote → same path (overwrite on Flipper); not capture-id based.
+        assert!(path.ends_with("_key.sub"), "{path}");
+        // Protocol_SERIAL_key.sub — not Year_Make_… or capture-id based.
+        assert!(
+            path.contains("Kia_V0_") || path.contains(&safe_stem(c.protocol_name())),
+            "expected protocol in {path}"
+        );
+        if let Some(s) = c.serial {
+            assert!(path.contains(&format!("{s:08X}")), "expected serial in {path}");
+        }
         let mut again = c.clone();
         again.id = 99;
         let (_, path2, _) = flipper_push_payload(&again, &reg, true).unwrap();
         assert_eq!(path, path2, "re-push must overwrite the same .sub");
-        assert!(
-            path.contains("serial_") || c.serial.is_none(),
-            "expected serial tag in {path}, serial={:?}",
-            c.serial
-        );
         let empty = Capture::from_pairs(3, 433_920_000, Vec::new());
         assert!(flipper_push_payload(&empty, &reg, true).is_err());
     }
