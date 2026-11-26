@@ -103,8 +103,9 @@ impl Config {
             import_directory: config_dir.join("import"),
             // 0 = keep every capture in the saved session (no "newest N" eviction).
             max_captures: 0,
-            show_unknown_signals: true, // researchers need to see them
-            ignore_duplicates: true,
+            // Default: hide Unknown; list every distinct press (duplicates kept).
+            show_unknown_signals: false,
+            ignore_duplicates: false,
             autobf: true,
             key_search_gpu: true,
             default_frequency: 433_920_000,
@@ -978,15 +979,15 @@ mod config_warning_tests {
         assert!(text.contains("keeloq_mfcodes_user") && text.contains("nice_flor_s.bin"));
     }
 
-    /// `show_unknown_signals` and `ignore_duplicates` default to on; `research_mode`, the old name
+    /// `show_unknown_signals` and `ignore_duplicates` default to off; `research_mode`, the old name
     /// of `show_unknown_signals`, still works and gives way to the new key.
     #[test]
     fn unknown_signals_and_duplicates_switches() {
         let (cfg, warnings) = parse("[general]\nmax_captures = 100\n");
-        assert_eq!((cfg.show_unknown_signals, cfg.ignore_duplicates), (true, true));
-        assert!(warnings.is_empty(), "{warnings:?}");
-        let (cfg, warnings) = parse("[general]\nshow_unknown_signals = false\nignore_duplicates = no\n");
         assert_eq!((cfg.show_unknown_signals, cfg.ignore_duplicates), (false, false));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let (cfg, warnings) = parse("[general]\nshow_unknown_signals = true\nignore_duplicates = yes\n");
+        assert_eq!((cfg.show_unknown_signals, cfg.ignore_duplicates), (true, true));
         assert!(warnings.is_empty(), "{warnings:?}");
         let (cfg, warnings) = parse("[general]\nresearch_mode = false\n");
         assert!(!cfg.show_unknown_signals && warnings.is_empty(), "{warnings:?}");

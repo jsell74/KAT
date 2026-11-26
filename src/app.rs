@@ -889,14 +889,28 @@ impl App {
             // What the list shows, and in which order (app/list_view.rs)
             "filter" => self.filter_command(rest),
             "sort" => self.sort_command(&args),
-            // U / :unknown: Unknown + duplicates together (show_unknown_signals / ignore_duplicates).
+            // U / :unknown — only Unknown (`show_unknown_signals`).
             "unknown" => match args.first().map(|a| a.to_ascii_lowercase()).as_deref() {
                 None => self.toggle_show_unknown(),
                 Some("on" | "1" | "true" | "yes" | "show") => self.set_show_unknown(true),
                 Some("off" | "0" | "false" | "no" | "hide") => self.set_show_unknown(false),
                 Some(_) => {
                     self.last_error = Some(
-                        "Usage: :unknown [on|off] (U toggles Unknown + duplicates in config.ini)".to_string(),
+                        "Usage: :unknown [on|off] (U; show_unknown_signals in config.ini)".to_string(),
+                    );
+                }
+            },
+            // :duplicates — only serial duplicates (`ignore_duplicates`).
+            "duplicates" | "dups" | "dup" => match args.first().map(|a| a.to_ascii_lowercase()).as_deref()
+            {
+                None => self.toggle_ignore_duplicates(),
+                // on/show = list duplicates → ignore_duplicates = false
+                Some("on" | "1" | "true" | "yes" | "show") => self.set_ignore_duplicates(false),
+                // off/hide = collapse duplicates → ignore_duplicates = true
+                Some("off" | "0" | "false" | "no" | "hide") => self.set_ignore_duplicates(true),
+                Some(_) => {
+                    self.last_error = Some(
+                        "Usage: :duplicates [on|off] (ignore_duplicates in config.ini)".to_string(),
                     );
                 }
             },

@@ -517,7 +517,7 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut A
                                 report!(app, app.delete_selected_capture());
                             }
                             KeyCode::Char('u') => app.undo_delete(),
-                            // Show or hide Unknown captures (config `show_unknown_signals`).
+                            // Show or hide Unknown only (config `show_unknown_signals`).
                             KeyCode::Char('U') => app.toggle_show_unknown(),
                             // Auto decrypt / key search (`autobf` in config.ini).
                             KeyCode::Char('B') => app.toggle_autobf(),
