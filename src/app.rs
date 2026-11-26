@@ -902,6 +902,18 @@ impl App {
             },
             // KeeLoq / HiTag2: GPU vs CPU (`key_search_device` in config.ini).
             "keydevice" | "keygpu" => self.cmd_key_search_device(&args),
+            // Auto key search / decrypt (`autobf` in config.ini; default on).
+            "autobf" | "autodecrypt" => match args.first().map(|a| a.to_ascii_lowercase()).as_deref() {
+                None => self.toggle_autobf(),
+                Some("on" | "1" | "true" | "yes" | "enable") => self.set_autobf(true),
+                Some("off" | "0" | "false" | "no" | "disable") => self.set_autobf(false),
+                Some(_) => {
+                    self.last_error = Some(
+                        "Usage: :autobf [on|off] (auto decrypt / key search; saved in config.ini)"
+                            .to_string(),
+                    );
+                }
+            },
             // Runtime radio prefs → config.ini (freq per device, hop, gains, tx).
             "save" | "wconfig" => self.cmd_save_config(),
             // Every capture the list shows → `/ext/subghz` on a Flipper over USB.
@@ -1023,6 +1035,37 @@ impl App {
             Err(e) => {
                 self.last_error =
                     Some(format!("Key search device set, but config.ini could not be saved: {e}"));
+            }
+        }
+    }
+
+    /// `:autobf` with no args — flip auto decrypt / key search.
+    pub fn toggle_autobf(&mut self) {
+        self.set_autobf(!self.storage.config.autobf);
+    }
+
+    /// Turn automatic key recovery on or off (`autobf` in config.ini). Off: no auto search on
+    /// new captures (manual "Recover key" still works). On: same behaviour as today's default.
+    pub fn set_autobf(&mut self, on: bool) {
+        self.storage.config.autobf = on;
+        self.protocols.set_auto_key_search(on);
+        if on {
+            let ids: Vec<u32> = self.captures.iter().map(|c| c.id).collect();
+            self.auto_bf_listed(ids);
+        } else {
+            self.auto_bf_cancel_automatic();
+        }
+        match self.storage.save_config() {
+            Ok(()) => {
+                self.status_message = Some(if on {
+                    "Auto decrypt on (autobf · saved in config.ini)".to_string()
+                } else {
+                    "Auto decrypt off (autobf · saved in config.ini)".to_string()
+                });
+            }
+            Err(e) => {
+                self.last_error =
+                    Some(format!("Auto decrypt set, but config.ini could not be saved: {e}"));
             }
         }
     }

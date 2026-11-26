@@ -631,7 +631,6 @@ mod tests {
         let key = crate::protocols::FlipperKey::parse(text).unwrap();
         let c = flipper::capture_from_key(&key, &reg, 7).unwrap();
         let (_, path, kind) = flipper_push_payload(&c, &reg, true).unwrap();
-        eprintln!("EXAMPLE_FLIPPER_PATH={path}");
         assert_eq!(kind, "key");
         assert!(path.starts_with("/ext/subghz/"), "{path}");
         assert!(path.ends_with("_key.sub"), "{path}");

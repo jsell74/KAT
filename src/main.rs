@@ -519,6 +519,8 @@ fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut A
                             KeyCode::Char('u') => app.undo_delete(),
                             // Show or hide Unknown captures (config `show_unknown_signals`).
                             KeyCode::Char('U') => app.toggle_show_unknown(),
+                            // Auto decrypt / key search (`autobf` in config.ini).
+                            KeyCode::Char('B') => app.toggle_autobf(),
                             // What the selected capture is: the Analyze report.
                             KeyCode::Char('a') => app.analyze_selected(),
                             // What its remote's bits mean: the presses of that remote lined up.
